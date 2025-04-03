@@ -1,0 +1,8 @@
+# Ignore image files
+*.jpg
+*.jpeg
+*.png
+# Ignore the virtual environment folder
+stego_env/
+__pycache__/
+debug_checkpoints/
