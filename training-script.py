@@ -38,6 +38,8 @@ class TinyImageNetDataset(Dataset):
             split (string): 'train', 'val', or 'test'
             transform (callable, optional): Optional transform to be applied on a sample
         """
+   
+        """
         self.root_dir = root_dir
         self.split = split
         self.transform = transform
@@ -70,7 +72,22 @@ class TinyImageNetDataset(Dataset):
                             self.img_paths.append(os.path.join(class_path, img_file))
         
         print(f"Loaded {len(self.img_paths)} images for {split}")
+        """
+        self.root_dir = os.path.join(root_dir, split)
+        self.transform = transform
+        self.img_paths = []
 
+        if not os.path.exists(self.root_dir):
+            print(f"{split.capitalize()} directory '{self.root_dir}' does not exist.")
+            return
+
+        for img_file in os.listdir(self.root_dir):
+            if img_file.endswith('.JPEG'):
+                self.img_paths.append(os.path.join(self.root_dir, img_file))
+
+        print(f"Loaded {len(self.img_paths)} images for {split}") 
+
+    
     def __len__(self):
         return len(self.img_paths)
 
