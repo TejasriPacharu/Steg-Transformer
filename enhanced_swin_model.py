@@ -708,7 +708,7 @@ class EnhancedSteganographySystem(nn.Module):
         # Generate container image
         container = self.hiding_network(cover_img, secret_img, embedding_map)
     
-    return container, cover_attention, secret_attention, embedding_map
+        return container, cover_attention, secret_attention, embedding_map
     
     def forward_extract(self, container):
         """
