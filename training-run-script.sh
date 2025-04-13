@@ -11,8 +11,8 @@ python training-script.py \
     --lr=0.0001 \
     --epochs=30 \
     --img_size=144 \
-    --alpha=0.7 \
-    --beta=0.3 \
+    --alpha=0.5 \
+    --beta=0.5 \
     --save_dir=./checkpoints \
     --vis_dir=./visualizations \
     --window_size=8 \
