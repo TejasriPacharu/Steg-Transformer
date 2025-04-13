@@ -405,7 +405,7 @@ def main():
     
     # Create models
     hiding_net = AttentionGuidedHidingNetwork(
-        img_size=64,
+        img_size=144,
         window_size=args.window_size,
         embed_dim=args.embed_dim,
         depths=args.depths,
