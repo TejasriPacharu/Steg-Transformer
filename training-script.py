@@ -16,7 +16,7 @@ from datetime import datetime
 import torchvision
 
 # Import the enhanced models from swin_model.py
-from swin_model import (
+from enhanced_swin_model import (
     DualAttentionHeatmapGenerator, 
     EnhancedHidingNetwork, 
     EnhancedExtractionNetwork, 
