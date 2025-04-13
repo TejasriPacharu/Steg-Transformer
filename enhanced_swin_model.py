@@ -565,7 +565,7 @@ class EnhancedHidingNetwork(nn.Module):
         
         # Apply residual connection for cover preservation
         # This is key to improving PSNR/SSIM
-        alpha = 0.8  # Balance parameter (can be made trainable)
+        alpha = 0.5  # Balance parameter (can be made trainable)
         container = alpha * cover_img + (1 - alpha) * container
         
         return container
