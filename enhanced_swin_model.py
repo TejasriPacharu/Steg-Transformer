@@ -571,7 +571,6 @@ class EnhancedHidingNetwork(nn.Module):
         
         return container
 
-# In enhanced_swin_model.py, modify EnhancedExtractionNetwork
 class EnhancedExtractionNetwork(nn.Module):
     def __init__(self, img_size=144, window_size=8, embed_dim=128, depths=[6, 6, 6, 6],
                  num_heads=[8, 8, 8, 8], mlp_ratio=4.):
@@ -587,6 +586,19 @@ class EnhancedExtractionNetwork(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
+        # RSTB blocks with increased capacity
+        self.layers = nn.ModuleList()
+        for i_layer in range(len(depths)):
+            layer = RSTB(
+                dim=embed_dim,
+                input_resolution=(img_size, img_size),
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                window_size=window_size,
+                mlp_ratio=mlp_ratio
+            )
+            self.layers.append(layer)
+        
         # Add direct skip connections from intermediate layers
         self.skip_features = nn.ModuleList()
         for i in range(len(depths)):
@@ -594,8 +606,19 @@ class EnhancedExtractionNetwork(nn.Module):
                 nn.Conv2d(embed_dim, 16, kernel_size=1)  # Projection for skip features
             )
         
-        # Rest of your existing implementation...
+        # Convert back to image space
+        self.conv_out = nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1)
         
+        # Final processing with concatenated skip features
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(64 + 16 * len(depths), 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 3, kernel_size=3, padding=1),
+            nn.Sigmoid()
+        )
+    
     def forward(self, container_img):
         # Initial feature extraction
         x = self.initial_conv(container_img)
@@ -607,18 +630,16 @@ class EnhancedExtractionNetwork(nn.Module):
             x = layer(x)
             skip_outputs.append(self.skip_features[i](x_prev))
         
-        # Combine skip features with main features
+        # Convert to image space
         x = self.conv_out(x)
         
         # Concatenate skip features
         for skip in skip_outputs:
             x = torch.cat([x, skip], dim=1)
             
-        # Adjust final conv to handle larger input channels
-        # (You'll need to modify the final_conv input channels accordingly)
+        # Final processing to generate secret image
         secret = self.final_conv(x)
         return secret
-
 
 # Complete Enhanced Steganography System
 class EnhancedSteganographySystem(nn.Module):
