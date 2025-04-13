@@ -5,7 +5,7 @@ python training-script.py \
     --batch_size=4 \
     --lr=0.001 \
     --epochs=10\
-    --img_size=32 \
+    --img_size=144 \
     --alpha=0.5 \
     --beta=0.5 \
     --save_dir=./debug_checkpoints \
