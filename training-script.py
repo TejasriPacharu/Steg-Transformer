@@ -14,6 +14,7 @@ import time
 import argparse
 from datetime import datetime
 import torchvision
+import torch.nn.functional as F
 
 # Import the enhanced models from swin_model.py
 from enhanced_swin_model import (
