@@ -63,7 +63,7 @@ class TinyImageNetDataset(Dataset):
         try:
             # Load the cover image
             cover_image = Image.open(img_path).convert('RGB')
-            
+            print(f"Original image size: {cover_image.size}")
             # For the secret image, select a different random image
             secret_idx = random.randint(0, len(self.img_paths) - 1)
             # Make sure it's not the same as the cover image
@@ -75,6 +75,7 @@ class TinyImageNetDataset(Dataset):
             
             if self.transform:
                 cover_image = self.transform(cover_image)
+                print(f"Transformed image size: {cover_image.shape}")
                 secret_image = self.transform(secret_image)
             
             # Return different images for cover and secret
@@ -404,7 +405,7 @@ def main():
     
     # Create models
     hiding_net = AttentionGuidedHidingNetwork(
-        img_size=args.img_size,
+        img_size=64,
         window_size=args.window_size,
         embed_dim=args.embed_dim,
         depths=args.depths,
