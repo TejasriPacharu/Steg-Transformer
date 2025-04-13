@@ -14,11 +14,17 @@ import time
 import argparse
 from datetime import datetime
 import torchvision
-import torch
 
-# If they're in the same file, you can import them directly
-from swin_model import AttentionGuidedHidingNetwork, ExtractionNetwork, calculate_psnr, calculate_ssim, calculate_mse
-
+# Import the enhanced models from swin_model.py
+from swin_model import (
+    DualAttentionHeatmapGenerator, 
+    EnhancedHidingNetwork, 
+    EnhancedExtractionNetwork, 
+    EnhancedSteganographySystem,
+    calculate_psnr, 
+    calculate_ssim, 
+    calculate_mse
+)
 
 # Set random seeds for reproducibility
 def set_seed(seed=42):
@@ -63,7 +69,7 @@ class TinyImageNetDataset(Dataset):
         try:
             # Load the cover image
             cover_image = Image.open(img_path).convert('RGB')
-            print(f"Original image size: {cover_image.size}")
+            
             # For the secret image, select a different random image
             secret_idx = random.randint(0, len(self.img_paths) - 1)
             # Make sure it's not the same as the cover image
@@ -75,7 +81,6 @@ class TinyImageNetDataset(Dataset):
             
             if self.transform:
                 cover_image = self.transform(cover_image)
-                print(f"Transformed image size: {cover_image.shape}")
                 secret_image = self.transform(secret_image)
             
             # Return different images for cover and secret
@@ -89,33 +94,51 @@ class TinyImageNetDataset(Dataset):
             else:
                 return Image.new('RGB', (64, 64), (0, 0, 0)), Image.new('RGB', (64, 64), (0, 0, 0))
 
-def train_epoch(hiding_net, extraction_net, dataloader, criterion_mse, optimizer_h, optimizer_e, device, 
-                alpha=0.5, beta=0.5, use_high_attention=True, attention_weight=0.1):
+class CombinedLoss(nn.Module):
     """
-    Train for one epoch
+    Combined loss function that balances L1 and SSIM loss
+    for better perceptual quality
+    """
+    def __init__(self, alpha=0.7):
+        super().__init__()
+        self.alpha = alpha
+        self.l1_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
+    
+    def forward(self, pred, target):
+        # L1 loss for overall structure
+        l1 = self.l1_loss(pred, target)
+        
+        # MSE loss for optimization stability
+        mse = self.mse_loss(pred, target)
+        
+        # Combined loss - mostly L1 with some MSE
+        return self.alpha * l1 + (1 - self.alpha) * mse
+
+def train_epoch(steg_system, dataloader, optimizer, device, 
+                alpha=0.5, beta=0.5, use_high_attention=True):
+    """
+    Train for one epoch using the enhanced steganography system
     
     Args:
-        hiding_net: Hiding network model
-        extraction_net: Extraction network model
+        steg_system: EnhancedSteganographySystem model
         dataloader: DataLoader for the training set
-        criterion_mse: MSE loss function
-        optimizer_h: Optimizer for hiding network
-        optimizer_e: Optimizer for extraction network
+        optimizer: Optimizer for the system
         device: Device to use (cuda/cpu)
         alpha: Weight for cover-container loss
         beta: Weight for secret-extracted loss
         use_high_attention: Whether to use high attention regions (True) or low attention regions (False)
-        attention_weight: Weight for attention map loss (if needed)
     
     Returns:
         average_loss: Average loss for the epoch
     """
-    hiding_net.train()
-    extraction_net.train()
+    steg_system.train()
     
     total_loss = 0.0
     total_hiding_loss = 0.0
     total_extraction_loss = 0.0
+    
+    criterion = CombinedLoss(alpha=0.7)
     
     progress_bar = tqdm(dataloader, desc='Training')
     
@@ -125,24 +148,24 @@ def train_epoch(hiding_net, extraction_net, dataloader, criterion_mse, optimizer
         secret_imgs = secret_imgs.to(device)
         
         # Zero the parameter gradients
-        optimizer_h.zero_grad()
-        optimizer_e.zero_grad()
+        optimizer.zero_grad()
         
-        # Forward pass - now with attention guidance
-        container_imgs, attention_maps = hiding_net(cover_imgs, secret_imgs, use_high_attention=use_high_attention)
-        extracted_secrets = extraction_net(container_imgs)
+        # Forward pass - using the enhanced system
+        container_imgs, cover_attention, secret_attention, embedding_map = steg_system.forward_hide(
+            cover_imgs, secret_imgs, use_high_attention=use_high_attention
+        )
+        extracted_secrets = steg_system.forward_extract(container_imgs)
         
         # Calculate losses
-        hiding_loss = criterion_mse(container_imgs, cover_imgs)  # Container should look like cover
-        extraction_loss = criterion_mse(extracted_secrets, secret_imgs)  # Extracted should match secret
+        hiding_loss = criterion(container_imgs, cover_imgs)  # Container should look like cover
+        extraction_loss = criterion(extracted_secrets, secret_imgs)  # Extracted should match secret
         
         # Combined loss
         loss = alpha * hiding_loss + beta * extraction_loss
         
         # Backward pass and optimize
         loss.backward()
-        optimizer_h.step()
-        optimizer_e.step()
+        optimizer.step()
         
         # Update stats
         total_loss += loss.item()
@@ -163,28 +186,22 @@ def train_epoch(hiding_net, extraction_net, dataloader, criterion_mse, optimizer
     
     return avg_loss, avg_hiding_loss, avg_extraction_loss
 
-def validate(hiding_net, extraction_net, dataloader, criterion_mse, device, 
-             alpha=0.5, beta=0.5, use_high_attention=True):
+def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_attention=True):
     """
-    Validate the model
+    Validate the model using the enhanced steganography system
     
     Args:
-        hiding_net: Hiding network model
-        extraction_net: Extraction network model
+        steg_system: EnhancedSteganographySystem model
         dataloader: DataLoader for the validation set
-        criterion_mse: MSE loss function
         device: Device to use (cuda/cpu)
         alpha: Weight for cover-container loss
         beta: Weight for secret-extracted loss
         use_high_attention: Whether to use high attention regions (True) or low attention regions (False)
     
     Returns:
-        average_loss: Average loss for the validation set
-        psnr_container: Average PSNR between cover and container
-        psnr_secret: Average PSNR between secret and extracted
+        Validation metrics
     """
-    hiding_net.eval()
-    extraction_net.eval()
+    steg_system.eval()
     
     total_loss = 0.0
     total_hiding_loss = 0.0
@@ -194,21 +211,24 @@ def validate(hiding_net, extraction_net, dataloader, criterion_mse, device,
     total_ssim_container = 0.0
     total_ssim_secret = 0.0
     
+    criterion = CombinedLoss(alpha=0.7)
+    
     with torch.no_grad():
         progress_bar = tqdm(dataloader, desc='Validating')
         
         for i, (cover_imgs, secret_imgs) in enumerate(progress_bar):
-            # Cover and secret images are already different (from the dataset)
             cover_imgs = cover_imgs.to(device)
             secret_imgs = secret_imgs.to(device)
             
-            # Forward pass - now with attention guidance
-            container_imgs, attention_maps = hiding_net(cover_imgs, secret_imgs, use_high_attention=use_high_attention)
-            extracted_secrets = extraction_net(container_imgs)
+            # Forward pass using the enhanced system
+            container_imgs, cover_atn, secret_atn, embed_map = steg_system.forward_hide(
+                cover_imgs, secret_imgs, use_high_attention=use_high_attention
+            )
+            extracted_secrets = steg_system.forward_extract(container_imgs)
             
             # Calculate losses
-            hiding_loss = criterion_mse(container_imgs, cover_imgs)
-            extraction_loss = criterion_mse(extracted_secrets, secret_imgs)
+            hiding_loss = criterion(container_imgs, cover_imgs)
+            extraction_loss = criterion(extracted_secrets, secret_imgs)
             
             # Combined loss
             loss = alpha * hiding_loss + beta * extraction_loss
@@ -216,18 +236,18 @@ def validate(hiding_net, extraction_net, dataloader, criterion_mse, device,
             # Calculate metrics
             for j in range(cover_imgs.size(0)):
                 # Convert to numpy for PSNR and SSIM calculation
-                cover_np = cover_imgs[j].cpu().numpy().transpose(1, 2, 0) * 255.0
-                container_np = container_imgs[j].cpu().numpy().transpose(1, 2, 0) * 255.0
-                secret_np = secret_imgs[j].cpu().numpy().transpose(1, 2, 0) * 255.0
-                extracted_np = extracted_secrets[j].cpu().numpy().transpose(1, 2, 0) * 255.0
+                cover_np = cover_imgs[j].cpu().numpy().transpose(1, 2, 0)
+                container_np = container_imgs[j].cpu().numpy().transpose(1, 2, 0)
+                secret_np = secret_imgs[j].cpu().numpy().transpose(1, 2, 0)
+                extracted_np = extracted_secrets[j].cpu().numpy().transpose(1, 2, 0)
                 
-                # Calculate PSNR
-                psnr_container = calculate_psnr(cover_np.astype(np.uint8), container_np.astype(np.uint8))
-                psnr_secret = calculate_psnr(secret_np.astype(np.uint8), extracted_np.astype(np.uint8))
+                # Calculate PSNR (normalized [0,1] images)
+                psnr_container = calculate_psnr(cover_np, container_np)
+                psnr_secret = calculate_psnr(secret_np, extracted_np)
                 
-                # Calculate SSIM
-                ssim_container = calculate_ssim(cover_np.astype(np.uint8), container_np.astype(np.uint8))
-                ssim_secret = calculate_ssim(secret_np.astype(np.uint8), extracted_np.astype(np.uint8))
+                # Calculate SSIM (normalized [0,1] images)
+                ssim_container = calculate_ssim(cover_np, container_np)
+                ssim_secret = calculate_ssim(secret_np, extracted_np)
                 
                 total_psnr_container += psnr_container
                 total_psnr_secret += psnr_secret
@@ -242,8 +262,8 @@ def validate(hiding_net, extraction_net, dataloader, criterion_mse, device,
             # Update progress bar
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'hiding_loss': f'{hiding_loss.item():.4f}',
-                'extract_loss': f'{extraction_loss.item():.4f}'
+                'psnr_c': f'{psnr_container:.2f}',
+                'psnr_s': f'{psnr_secret:.2f}'
             })
     
     # Calculate averages
@@ -260,21 +280,11 @@ def validate(hiding_net, extraction_net, dataloader, criterion_mse, device,
             avg_psnr_container, avg_psnr_secret, 
             avg_ssim_container, avg_ssim_secret)
 
-def visualize_results(hiding_net, extraction_net, dataloader, device, save_dir, epoch, use_high_attention=True):
+def visualize_results(steg_system, dataloader, device, save_dir, epoch, use_high_attention=True):
     """
-    Visualize the results on a few sample images
-    
-    Args:
-        hiding_net: Hiding network model
-        extraction_net: Extraction network model
-        dataloader: DataLoader for the validation set
-        device: Device to use (cuda/cpu)
-        save_dir: Directory to save the visualizations
-        epoch: Current epoch number
-        use_high_attention: Whether to use high attention regions (True) or low attention regions (False)
+    Visualize the results on a few sample images using the enhanced steganography system
     """
-    hiding_net.eval()
-    extraction_net.eval()
+    steg_system.eval()
     
     # Create directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
@@ -290,36 +300,43 @@ def visualize_results(hiding_net, extraction_net, dataloader, device, save_dir, 
     secret_imgs = secret_imgs[:n_samples].to(device)
     
     with torch.no_grad():
-        # Forward pass - now with attention guidance
-        container_imgs, attention_maps = hiding_net(cover_imgs, secret_imgs, use_high_attention=use_high_attention)
-        extracted_secrets = extraction_net(container_imgs)
+        # Get the comparison results
+        results = steg_system.compare_attention_methods(cover_imgs, secret_imgs)
+        
+        # Extract the relevant tensors for visualization
+        container_high = results["container_high"]
+        container_low = results["container_low"]
+        extracted_high = results["extracted_high"]
+        extracted_low = results["extracted_low"]
+        cover_attention = results["cover_attention"]
+        secret_attention = results["secret_attention"]
+        embedding_map_high = results["embedding_map_high"]
+        embedding_map_low = results["embedding_map_low"]
+        metrics = results["metrics"]
     
     attention_mode = "high" if use_high_attention else "low"
     
-    # Create a figure with n_samples rows (one for each sample) and 5 columns (cover, secret, attention map, container, extracted)
-    fig, axes = plt.subplots(n_samples, 5, figsize=(20, 4 * n_samples))
+    # Create a figure with n_samples rows and 8 columns for comprehensive visualization
+    fig, axes = plt.subplots(n_samples, 8, figsize=(24, 5 * n_samples))
     
     # Handle case where n_samples is 1 (axes would be 1D)
     if n_samples == 1:
         axes = axes.reshape(1, -1)
     
     for i in range(n_samples):
-        # Convert tensors to numpy for visualization
+        # Extract single sample tensors
         cover_np = cover_imgs[i].cpu().numpy().transpose(1, 2, 0)
         secret_np = secret_imgs[i].cpu().numpy().transpose(1, 2, 0)
-        container_np = container_imgs[i].cpu().numpy().transpose(1, 2, 0)
-        extracted_np = extracted_secrets[i].cpu().numpy().transpose(1, 2, 0)
-        attention_np = attention_maps[i].cpu().numpy().squeeze()
+        cover_atn_np = cover_attention[i].cpu().numpy().squeeze()
+        secret_atn_np = secret_attention[i].cpu().numpy().squeeze()
+        embed_map_high_np = embedding_map_high[i].cpu().numpy().squeeze()
+        embed_map_low_np = embedding_map_low[i].cpu().numpy().squeeze()
+        container_high_np = container_high[i].cpu().numpy().transpose(1, 2, 0)
+        container_low_np = container_low[i].cpu().numpy().transpose(1, 2, 0)
+        extracted_high_np = extracted_high[i].cpu().numpy().transpose(1, 2, 0)
+        extracted_low_np = extracted_low[i].cpu().numpy().transpose(1, 2, 0)
         
-        # Calculate PSNR
-        psnr_container = calculate_psnr((cover_np * 255).astype(np.uint8), (container_np * 255).astype(np.uint8))
-        psnr_secret = calculate_psnr((secret_np * 255).astype(np.uint8), (extracted_np * 255).astype(np.uint8))
-        
-        # Calculate SSIM
-        ssim_container = calculate_ssim((cover_np * 255).astype(np.uint8), (container_np * 255).astype(np.uint8))
-        ssim_secret = calculate_ssim((secret_np * 255).astype(np.uint8), (extracted_np * 255).astype(np.uint8))
-        
-        # Plot images
+        # Display images
         axes[i, 0].imshow(np.clip(cover_np, 0, 1))
         axes[i, 0].set_title('Cover Image')
         axes[i, 0].axis('off')
@@ -328,18 +345,58 @@ def visualize_results(hiding_net, extraction_net, dataloader, device, save_dir, 
         axes[i, 1].set_title('Secret Image')
         axes[i, 1].axis('off')
         
-        # Display attention heatmap
-        axes[i, 2].imshow(attention_np, cmap='hot')
-        axes[i, 2].set_title(f'{attention_mode.capitalize()} Attention Map')
+        # Display attention heatmaps
+        axes[i, 2].imshow(cover_atn_np, cmap='hot')
+        axes[i, 2].set_title('Cover Attention')
         axes[i, 2].axis('off')
         
-        axes[i, 3].imshow(np.clip(container_np, 0, 1))
-        axes[i, 3].set_title(f'Container\nPSNR: {psnr_container:.2f}dB\nSSIM: {ssim_container:.4f}')
+        axes[i, 3].imshow(secret_atn_np, cmap='hot')
+        axes[i, 3].set_title('Secret Attention')
         axes[i, 3].axis('off')
         
-        axes[i, 4].imshow(np.clip(extracted_np, 0, 1))
-        axes[i, 4].set_title(f'Extracted Secret\nPSNR: {psnr_secret:.2f}dB\nSSIM: {ssim_secret:.4f}')
+        # Display embedding maps
+        axes[i, 4].imshow(embed_map_high_np, cmap='viridis')
+        axes[i, 4].set_title('High Attn Embedding')
         axes[i, 4].axis('off')
+        
+        axes[i, 5].imshow(embed_map_low_np, cmap='viridis')
+        axes[i, 5].set_title('Low Attn Embedding')
+        axes[i, 5].axis('off')
+        
+        # Calculate PSNR and SSIM for each sample
+        psnr_high_container = calculate_psnr(cover_np, container_high_np)
+        ssim_high_container = calculate_ssim(cover_np, container_high_np)
+        psnr_high_secret = calculate_psnr(secret_np, extracted_high_np)
+        ssim_high_secret = calculate_ssim(secret_np, extracted_high_np)
+        
+        psnr_low_container = calculate_psnr(cover_np, container_low_np)
+        ssim_low_container = calculate_ssim(cover_np, container_low_np)
+        psnr_low_secret = calculate_psnr(secret_np, extracted_low_np)
+        ssim_low_secret = calculate_ssim(secret_np, extracted_low_np)
+        
+        # Display high attention results
+        if use_high_attention:
+            container_np = container_high_np
+            extracted_np = extracted_high_np
+            
+            axes[i, 6].imshow(np.clip(container_np, 0, 1))
+            axes[i, 6].set_title(f'Container (High)\nPSNR: {psnr_high_container:.2f}dB\nSSIM: {ssim_high_container:.4f}')
+            axes[i, 6].axis('off')
+            
+            axes[i, 7].imshow(np.clip(extracted_np, 0, 1))
+            axes[i, 7].set_title(f'Extracted (High)\nPSNR: {psnr_high_secret:.2f}dB\nSSIM: {ssim_high_secret:.4f}')
+            axes[i, 7].axis('off')
+        else:
+            container_np = container_low_np
+            extracted_np = extracted_low_np
+            
+            axes[i, 6].imshow(np.clip(container_np, 0, 1))
+            axes[i, 6].set_title(f'Container (Low)\nPSNR: {psnr_low_container:.2f}dB\nSSIM: {ssim_low_container:.4f}')
+            axes[i, 6].axis('off')
+            
+            axes[i, 7].imshow(np.clip(extracted_np, 0, 1))
+            axes[i, 7].set_title(f'Extracted (Low)\nPSNR: {psnr_low_secret:.2f}dB\nSSIM: {ssim_low_secret:.4f}')
+            axes[i, 7].axis('off')
     
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f'results_epoch_{epoch}_{attention_mode}_attention.png'))
@@ -357,25 +414,24 @@ def save_checkpoint(state, filename):
     print(f"Checkpoint saved to {filename}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Train SWinT model with Attention Guidance on Tiny-ImageNet')
+    parser = argparse.ArgumentParser(description='Train Enhanced Dual-Attention Steganography System on Tiny-ImageNet')
     parser.add_argument('--data_dir', type=str, default='./', help='Path to tiny-imagenet-200 directory')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--img_size', type=int, default=144, help='Image size')
-    parser.add_argument('--alpha', type=float, default=0.5, help='Weight for hiding loss')
-    parser.add_argument('--beta', type=float, default=0.5, help='Weight for extraction loss')
+    parser.add_argument('--alpha', type=float, default=0.7, help='Weight for container quality (hiding loss)')
+    parser.add_argument('--beta', type=float, default=0.3, help='Weight for secret recovery (extraction loss)')
     parser.add_argument('--save_dir', type=str, default='./checkpoints', help='Directory to save checkpoints')
     parser.add_argument('--vis_dir', type=str, default='./visualizations', help='Directory to save visualizations')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--window_size', type=int, default=8, help='Window size for SWinT')
-    parser.add_argument('--embed_dim', type=int, default=96, help='Embedding dimension')
-    parser.add_argument('--num_heads', type=list, default=[6, 6, 6, 6], help='Number of heads in each layer')
-    parser.add_argument('--depths', type=list, default=[2, 2, 2, 2], help='Depth of each layer')
+    parser.add_argument('--embed_dim', type=int, default=128, help='Embedding dimension')
+    parser.add_argument('--num_heads', type=int, nargs='+', default=[8, 8, 8, 8], help='Number of heads in each layer')
+    parser.add_argument('--depths', type=int, nargs='+', default=[6, 6, 6, 6], help='Depth of each layer')
     parser.add_argument('--use_high_attention', type=bool, default=True, help='Whether to use high attention regions (True) or low attention regions (False)')
-    parser.add_argument('--train_both', type=bool, default=False, help='Whether to train with both high and low attention modes')
-    parser.add_argument('--attention_weight', type=float, default=0.1, help='Weight for attention map loss')
+    parser.add_argument('--train_both', type=bool, default=True, help='Whether to train with both high and low attention modes')
     
     args = parser.parse_args()
     
@@ -403,59 +459,56 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
-    # Create models
-    hiding_net = AttentionGuidedHidingNetwork(
-        img_size=144,
-        window_size=args.window_size,
-        embed_dim=args.embed_dim,
-        depths=args.depths,
-        num_heads=args.num_heads
-    ).to(device)
-    
-    extraction_net = ExtractionNetwork(
+    # Create the enhanced steganography system
+    steg_system = EnhancedSteganographySystem(
         img_size=args.img_size,
-        window_size=args.window_size,
         embed_dim=args.embed_dim,
         depths=args.depths,
-        num_heads=args.num_heads
+        num_heads=args.num_heads,
+        window_size=args.window_size
     ).to(device)
     
-    # Define loss function
-    criterion_mse = nn.MSELoss()
+    print(f"Created EnhancedSteganographySystem with:")
+    print(f"  - Image size: {args.img_size}x{args.img_size}")
+    print(f"  - Embedding dimension: {args.embed_dim}")
+    print(f"  - Window size: {args.window_size}")
+    print(f"  - Depths: {args.depths}")
+    print(f"  - Number of heads: {args.num_heads}")
     
-    # Define optimizers
-    optimizer_h = optim.Adam(hiding_net.parameters(), lr=args.lr)
-    optimizer_e = optim.Adam(extraction_net.parameters(), lr=args.lr)
+    # Define optimizer with parameter groups for different learning rates
+    params_dict = [
+        {"params": steg_system.cover_attention.parameters(), "lr": args.lr * 0.5},
+        {"params": steg_system.secret_attention.parameters(), "lr": args.lr * 0.5},
+        {"params": steg_system.hiding_network.parameters(), "lr": args.lr},
+        {"params": steg_system.extraction_network.parameters(), "lr": args.lr},
+    ]
     
-    # Learning rate schedulers
-    scheduler_h = optim.lr_scheduler.StepLR(optimizer_h, step_size=10, gamma=0.5)
-    scheduler_e = optim.lr_scheduler.StepLR(optimizer_e, step_size=10, gamma=0.5)
+    optimizer = optim.AdamW(params_dict, weight_decay=1e-4)
+    
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     
     # Initialize variables
     start_epoch = 0
     best_val_loss = float('inf')
+    best_container_psnr = 0
+    best_secret_psnr = 0
     
     # Resume from checkpoint if specified
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print(f"Loading checkpoint: {args.resume}")
-            checkpoint = torch.load(args.resume, map_location=device)
-            
-            start_epoch = checkpoint['epoch']
-            best_val_loss = checkpoint['best_val_loss']
-            
-            hiding_net.load_state_dict(checkpoint['hiding_state_dict'])
-            extraction_net.load_state_dict(checkpoint['extraction_state_dict'])
-            
-            optimizer_h.load_state_dict(checkpoint['optimizer_h_state_dict'])
-            optimizer_e.load_state_dict(checkpoint['optimizer_e_state_dict'])
-            
-            scheduler_h.load_state_dict(checkpoint['scheduler_h_state_dict'])
-            scheduler_e.load_state_dict(checkpoint['scheduler_e_state_dict'])
-            
-            print(f"Loaded checkpoint '{args.resume}' (epoch {checkpoint['epoch']})")
-        else:
-            print(f"No checkpoint found at '{args.resume}'")
+    if args.resume and os.path.isfile(args.resume):
+        print(f"Loading checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        
+        start_epoch = checkpoint['epoch']
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        best_container_psnr = checkpoint.get('best_container_psnr', 0)
+        best_secret_psnr = checkpoint.get('best_secret_psnr', 0)
+        
+        steg_system.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        print(f"Loaded checkpoint '{args.resume}' (epoch {checkpoint['epoch']})")
     
     # Training loop
     print("Starting training...")
@@ -464,49 +517,48 @@ def main():
         
         # Train with specified attention mode
         train_loss, train_hiding_loss, train_extraction_loss = train_epoch(
-            hiding_net, extraction_net, train_loader, criterion_mse, 
-            optimizer_h, optimizer_e, device, args.alpha, args.beta, 
-            use_high_attention=args.use_high_attention,
-            attention_weight=args.attention_weight
+            steg_system, train_loader, optimizer, device, 
+            alpha=args.alpha, beta=args.beta, 
+            use_high_attention=args.use_high_attention
         )
         
         # If train_both flag is set, also train with the opposite attention mode
         if args.train_both:
             print(f"Training with {'low' if args.use_high_attention else 'high'} attention regions...")
             opposite_train_loss, opposite_train_hiding_loss, opposite_train_extraction_loss = train_epoch(
-                hiding_net, extraction_net, train_loader, criterion_mse, 
-                optimizer_h, optimizer_e, device, args.alpha, args.beta, 
-                use_high_attention=not args.use_high_attention,
-                attention_weight=args.attention_weight
+                steg_system, train_loader, optimizer, device, 
+                alpha=args.alpha, beta=args.beta, 
+                use_high_attention=not args.use_high_attention
             )
         
         # Validate with specified attention mode
         val_metrics = validate(
-            hiding_net, extraction_net, val_loader, criterion_mse, 
-            device, args.alpha, args.beta, use_high_attention=args.use_high_attention
+            steg_system, val_loader, device, 
+            alpha=args.alpha, beta=args.beta, 
+            use_high_attention=args.use_high_attention
         )
         
         val_loss, val_hiding_loss, val_extraction_loss, val_psnr_container, val_psnr_secret, val_ssim_container, val_ssim_secret = val_metrics
         
         # Visualize results with specified attention mode
-        visualize_results(hiding_net, extraction_net, val_loader, device, args.vis_dir, epoch, use_high_attention=args.use_high_attention)
+        visualize_results(steg_system, val_loader, device, args.vis_dir, epoch, use_high_attention=args.use_high_attention)
         
         # If train_both flag is set, also validate and visualize with the opposite attention mode
         if args.train_both:
             print(f"Validating with {'low' if args.use_high_attention else 'high'} attention regions...")
             opposite_val_metrics = validate(
-                hiding_net, extraction_net, val_loader, criterion_mse, 
-                device, args.alpha, args.beta, use_high_attention=not args.use_high_attention
+                steg_system, val_loader, device, 
+                alpha=args.alpha, beta=args.beta, 
+                use_high_attention=not args.use_high_attention
             )
             
             opposite_val_loss, opposite_val_hiding_loss, opposite_val_extraction_loss, opposite_val_psnr_container, opposite_val_psnr_secret, opposite_val_ssim_container, opposite_val_ssim_secret = opposite_val_metrics
             
             # Visualize results with opposite attention mode
-            visualize_results(hiding_net, extraction_net, val_loader, device, args.vis_dir, epoch, use_high_attention=not args.use_high_attention)
+            visualize_results(steg_system, val_loader, device, args.vis_dir, epoch, use_high_attention=not args.use_high_attention)
         
-        # Step the schedulers
-        scheduler_h.step()
-        scheduler_e.step()
+        # Step the scheduler
+        scheduler.step()
         
         # Print metrics for specified attention mode
         attention_mode = "high" if args.use_high_attention else "low"
@@ -525,25 +577,21 @@ def main():
             print(f"PSNR Container: {opposite_val_psnr_container:.2f}dB, PSNR Secret: {opposite_val_psnr_secret:.2f}dB")
             print(f"SSIM Container: {opposite_val_ssim_container:.4f}, SSIM Secret: {opposite_val_ssim_secret:.4f}")
         
-        # Save checkpoint
-        is_best = val_loss < best_val_loss
-        best_val_loss = min(val_loss, best_val_loss)
-        
+        # Save checkpoint for each epoch
         checkpoint_data = {
             'epoch': epoch + 1,
-            'hiding_state_dict': hiding_net.state_dict(),
-            'extraction_state_dict': extraction_net.state_dict(),
-            'optimizer_h_state_dict': optimizer_h.state_dict(),
-            'optimizer_e_state_dict': optimizer_e.state_dict(),
-            'scheduler_h_state_dict': scheduler_h.state_dict(),
-            'scheduler_e_state_dict': scheduler_e.state_dict(),
-            'best_val_loss': best_val_loss,
+            'model_state_dict': steg_system.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'train_loss': train_loss,
             'val_loss': val_loss,
             'val_psnr_container': val_psnr_container,
             'val_psnr_secret': val_psnr_secret,
             'val_ssim_container': val_ssim_container,
             'val_ssim_secret': val_ssim_secret,
+            'best_val_loss': best_val_loss,
+            'best_container_psnr': best_container_psnr,
+            'best_secret_psnr': best_secret_psnr,
             'attention_mode': attention_mode,
         }
         
@@ -552,13 +600,157 @@ def main():
             os.path.join(args.save_dir, f'checkpoint_epoch_{epoch+1}_{attention_mode}_attention.pth')
         )
         
-        if is_best:
+        # Check if this is the best model by container PSNR (primary metric)
+        is_best_container = val_psnr_container > best_container_psnr
+        if is_best_container:
+            best_container_psnr = val_psnr_container
             save_checkpoint(
                 checkpoint_data,
-                os.path.join(args.save_dir, f'best_model_{attention_mode}_attention.pth')
+                os.path.join(args.save_dir, f'best_container_model_{attention_mode}_attention.pth')
             )
+            
+        # Also save best model by secret PSNR
+        is_best_secret = val_psnr_secret > best_secret_psnr
+        if is_best_secret:
+            best_secret_psnr = val_psnr_secret
+            save_checkpoint(
+                checkpoint_data,
+                os.path.join(args.save_dir, f'best_secret_model_{attention_mode}_attention.pth')
+            )
+            
+        # If training both modes, also save the best from opposite mode
+        if args.train_both:
+            opposite_mode = "low" if args.use_high_attention else "high"
+            
+            # Save best opposite container model
+            if opposite_val_psnr_container > best_container_psnr:
+                best_container_psnr = opposite_val_psnr_container
+                opposite_checkpoint_data = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': steg_system.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'train_loss': opposite_train_loss,
+                    'val_loss': opposite_val_loss,
+                    'val_psnr_container': opposite_val_psnr_container,
+                    'val_psnr_secret': opposite_val_psnr_secret,
+                    'val_ssim_container': opposite_val_ssim_container,
+                    'val_ssim_secret': opposite_val_ssim_secret,
+                    'best_val_loss': best_val_loss,
+                    'best_container_psnr': best_container_psnr,
+                    'best_secret_psnr': best_secret_psnr,
+                    'attention_mode': opposite_mode,
+                }
+                save_checkpoint(
+                    opposite_checkpoint_data,
+                    os.path.join(args.save_dir, f'best_container_model_{opposite_mode}_attention.pth')
+                )
     
     print("Training completed!")
+    
+    # Final evaluation with both attention modes
+    print("\nFinal Evaluation:")
+    
+    # Create a test batch for final evaluation
+    final_val_loader = DataLoader(val_dataset, batch_size=min(16, len(val_dataset)), shuffle=True, num_workers=4, pin_memory=True)
+    test_cover, test_secret = next(iter(final_val_loader))
+    test_cover, test_secret = test_cover.to(device), test_secret.to(device)
+    
+    # Run final comprehensive evaluation with visualizations
+    with torch.no_grad():
+        # Get results for both modes
+        results = steg_system.compare_attention_methods(test_cover, test_secret)
+        metrics = results["metrics"]
+        
+        # Create the final comparison visualization
+        fig, axes = plt.subplots(len(test_cover), 5, figsize=(20, 4 * len(test_cover)))
+        
+        # Handle case where there's only one sample
+        if len(test_cover) == 1:
+            axes = axes.reshape(1, -1)
+            
+        for i in range(len(test_cover)):
+            # Extract the data for this sample
+            cover_np = test_cover[i].cpu().numpy().transpose(1, 2, 0)
+            secret_np = test_secret[i].cpu().numpy().transpose(1, 2, 0)
+            
+            # Get the high attention results
+            container_high_np = results["container_high"][i].cpu().numpy().transpose(1, 2, 0)
+            extracted_high_np = results["extracted_high"][i].cpu().numpy().transpose(1, 2, 0)
+            
+            # Get the low attention results
+            container_low_np = results["container_low"][i].cpu().numpy().transpose(1, 2, 0)
+            extracted_low_np = results["extracted_low"][i].cpu().numpy().transpose(1, 2, 0)
+            
+            # Calculate metrics for this sample
+            high_psnr_container = calculate_psnr(cover_np, container_high_np)
+            high_ssim_container = calculate_ssim(cover_np, container_high_np)
+            high_psnr_secret = calculate_psnr(secret_np, extracted_high_np)
+            high_ssim_secret = calculate_ssim(secret_np, extracted_high_np)
+            
+            low_psnr_container = calculate_psnr(cover_np, container_low_np)
+            low_ssim_container = calculate_ssim(cover_np, container_low_np)
+            low_psnr_secret = calculate_psnr(secret_np, extracted_low_np)
+            low_ssim_secret = calculate_ssim(secret_np, extracted_low_np)
+            
+            # Plot the images
+            axes[i, 0].imshow(cover_np)
+            axes[i, 0].set_title("Cover Image")
+            axes[i, 0].axis("off")
+            
+            axes[i, 1].imshow(secret_np)
+            axes[i, 1].set_title("Secret Image")
+            axes[i, 1].axis("off")
+            
+            axes[i, 2].imshow(container_high_np)
+            axes[i, 2].set_title(f"High Attention Container\nPSNR: {high_psnr_container:.2f}, SSIM: {high_ssim_container:.4f}")
+            axes[i, 2].axis("off")
+            
+            axes[i, 3].imshow(container_low_np)
+            axes[i, 3].set_title(f"Low Attention Container\nPSNR: {low_psnr_container:.2f}, SSIM: {low_ssim_container:.4f}")
+            axes[i, 3].axis("off")
+            
+            # Show the better extraction result based on PSNR
+            if high_psnr_secret > low_psnr_secret:
+                axes[i, 4].imshow(extracted_high_np)
+                axes[i, 4].set_title(f"Best Extracted Secret (High)\nPSNR: {high_psnr_secret:.2f}, SSIM: {high_ssim_secret:.4f}")
+            else:
+                axes[i, 4].imshow(extracted_low_np)
+                axes[i, 4].set_title(f"Best Extracted Secret (Low)\nPSNR: {low_psnr_secret:.2f}, SSIM: {low_ssim_secret:.4f}")
+            axes[i, 4].axis("off")
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(args.vis_dir, "final_comparison.png"))
+        
+        # Print the average metrics
+        print("\nAverage Results Across Test Batch:")
+        print("High Attention Mode:")
+        print(f"  Container - PSNR: {metrics['high_attention']['container']['psnr']:.2f}dB, SSIM: {metrics['high_attention']['container']['ssim']:.4f}")
+        print(f"  Extracted - PSNR: {metrics['high_attention']['extracted']['psnr']:.2f}dB, SSIM: {metrics['high_attention']['extracted']['ssim']:.4f}")
+        print("Low Attention Mode:")
+        print(f"  Container - PSNR: {metrics['low_attention']['container']['psnr']:.2f}dB, SSIM: {metrics['low_attention']['container']['ssim']:.4f}")
+        print(f"  Extracted - PSNR: {metrics['low_attention']['extracted']['psnr']:.2f}dB, SSIM: {metrics['low_attention']['extracted']['ssim']:.4f}")
+        
+        # Determine which mode performed better overall
+        high_total = metrics['high_attention']['container']['psnr'] + metrics['high_attention']['extracted']['psnr']
+        low_total = metrics['low_attention']['container']['psnr'] + metrics['low_attention']['extracted']['psnr']
+        
+        if high_total > low_total:
+            print("\n⭐ High attention embedding performed better overall")
+        else:
+            print("\n⭐ Low attention embedding performed better overall")
+        
+        # Give advice for real-world usage
+        print("\nRecommendation for optimal usage:")
+        if metrics['high_attention']['container']['psnr'] > metrics['low_attention']['container']['psnr']:
+            print("- For best container quality (imperceptibility): Use HIGH attention embedding")
+        else:
+            print("- For best container quality (imperceptibility): Use LOW attention embedding")
+            
+        if metrics['high_attention']['extracted']['psnr'] > metrics['low_attention']['extracted']['psnr']:
+            print("- For best secret recovery: Use HIGH attention embedding")
+        else:
+            print("- For best secret recovery: Use LOW attention embedding")
 
 if __name__ == "__main__":
     main()
