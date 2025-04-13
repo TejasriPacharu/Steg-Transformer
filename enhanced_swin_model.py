@@ -570,58 +570,54 @@ class EnhancedHidingNetwork(nn.Module):
         
         return container
 
-# Enhanced Extraction Network
+# In enhanced_swin_model.py, modify EnhancedExtractionNetwork
 class EnhancedExtractionNetwork(nn.Module):
-    """
-    Improved extraction network with higher capacity for better secret recovery
-    """
     def __init__(self, img_size=144, window_size=8, embed_dim=128, depths=[6, 6, 6, 6],
                  num_heads=[8, 8, 8, 8], mlp_ratio=4.):
         super().__init__()
         
-        # Initial convolutional embedding with enhanced architecture
+        # Add a more powerful initial feature extraction
         self.initial_conv = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Extra conv layer
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, embed_dim, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2)
         )
         
-        # RSTB blocks
-        self.layers = nn.ModuleList()
-        for i_layer in range(len(depths)):
-            layer = RSTB(
-                dim=embed_dim,
-                input_resolution=(img_size, img_size),
-                depth=depths[i_layer],
-                num_heads=num_heads[i_layer],
-                window_size=window_size,
-                mlp_ratio=mlp_ratio
+        # Add direct skip connections from intermediate layers
+        self.skip_features = nn.ModuleList()
+        for i in range(len(depths)):
+            self.skip_features.append(
+                nn.Conv2d(embed_dim, 16, kernel_size=1)  # Projection for skip features
             )
-            self.layers.append(layer)
         
-        # Final processing with increased capacity
-        self.final_conv = nn.Sequential(
-            nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=3, padding=1),
-            nn.Sigmoid()
-        )
-    
+        # Rest of your existing implementation...
+        
     def forward(self, container_img):
         # Initial feature extraction
         x = self.initial_conv(container_img)
         
-        # Process through RSTB blocks
-        for layer in self.layers:
+        # Process through RSTB blocks with skip connections
+        skip_outputs = []
+        for i, layer in enumerate(self.layers):
+            x_prev = x  # Save the input to this layer
             x = layer(x)
+            skip_outputs.append(self.skip_features[i](x_prev))
         
-        # Final processing
+        # Combine skip features with main features
+        x = self.conv_out(x)
+        
+        # Concatenate skip features
+        for skip in skip_outputs:
+            x = torch.cat([x, skip], dim=1)
+            
+        # Adjust final conv to handle larger input channels
+        # (You'll need to modify the final_conv input channels accordingly)
         secret = self.final_conv(x)
-        
         return secret
+
 
 # Complete Enhanced Steganography System
 class EnhancedSteganographySystem(nn.Module):
@@ -678,7 +674,7 @@ class EnhancedSteganographySystem(nn.Module):
         while maintaining higher visual quality
         """
         min_strength = 0.4  # Minimum embedding strength 
-        max_strength = 0.8  # Maximum embedding strength
+        max_strength = 0.9  # Maximum embedding strength
         
         # Normalize to use full range while preserving relative values
         B, C, H, W = strength_map.shape
@@ -718,7 +714,20 @@ class EnhancedSteganographySystem(nn.Module):
         Forward pass for extraction process
         """
         return self.extraction_network(container)
-    
+
+    # Add this to the EnhancedSteganographySystem class
+    def attention_loss(self, cover_attention, secret_attention):
+        # Encourage diversity in attention maps
+        # Penalize uniform attention (too high or too low values across the map)
+        cover_mean = cover_attention.mean()
+        cover_std = cover_attention.std()
+        secret_mean = secret_attention.mean()
+        secret_std = secret_attention.std()
+        
+        # Encourage attention maps with good standard deviation (not uniform)
+        diversity_loss = torch.exp(-cover_std*5) + torch.exp(-secret_std*5)
+        return diversity_loss
+        
     def compare_attention_methods(self, cover_imgs, secret_imgs):
         """
         Compare high vs low attention methods and compute metrics
