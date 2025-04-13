@@ -545,9 +545,10 @@ class AttentionGuidedHidingNetwork(nn.Module):
                  num_heads=[8, 8, 8, 8], mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., norm_layer=nn.LayerNorm):
         super().__init__()
-
+                     
+        print(f"AttentionGuidedHidingNetwork initialized with img_size={img_size}")
         # Add attention heatmap generator
-        self.heatmap_generator = AttentionHeatmapGenerator(dim=embed_dim, num_heads=num_heads[0], window_size=window_size)
+        self.heatmap_generator = AttentionHeatmapGenerator(dim=embed_dim, num_heads=num_heads[0], window_size=window_size, img_size = img_size)
 
         # Rest of the hiding network remains the same
         # Shallow Information Hiding module
