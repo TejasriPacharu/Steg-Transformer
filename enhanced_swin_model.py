@@ -677,7 +677,7 @@ class EnhancedSteganographySystem(nn.Module):
         Adaptive scaling to ensure enough embedding capacity
         while maintaining higher visual quality
         """
-        min_strength = 0.2  # Minimum embedding strength 
+        min_strength = 0.4  # Minimum embedding strength 
         max_strength = 0.8  # Maximum embedding strength
         
         # Normalize to use full range while preserving relative values
