@@ -413,6 +413,62 @@ class RSTB(nn.Module):
         # Add residual connection
         return x_conv + identity
 
+class AttentionHeatmapGenerator(nn.Module):
+    def __init__(self, dim=64, num_heads=6, window_size=8, img_size=144):
+        super().__init__()
+        self.dim = dim
+        self.img_size = img_size
+
+        # Initial feature extraction
+        self.init_conv = nn.Conv2d(3, dim, kernel_size=3, padding=1)
+
+        # Use proper Swin Transformer block
+        self.swin_block = SwinTransformerBlock(
+            dim=dim,
+            input_resolution=(img_size, img_size),
+            num_heads=num_heads,
+            window_size=window_size,
+            shift_size=window_size // 2  # Add proper shift size
+        )
+
+        # Add normalization layers
+        self.norm = nn.LayerNorm(dim)
+
+        # Process attention into heatmap with better design
+        self.conv_process = nn.Sequential(
+            nn.Conv2d(dim, dim//2, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(dim//2, dim//4, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(dim//4, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        # Extract features
+        features = self.init_conv(x)
+
+        # Reshape for Swin Transformer
+        features_reshaped = features.flatten(2).transpose(1, 2)  # B, H*W, C
+
+        # Apply Swin Transformer
+        transformed = self.swin_block(features_reshaped)
+
+        # Normalize
+        transformed = self.norm(transformed)
+
+        # Reshape back to spatial form
+        transformed = transformed.view(B, H, W, -1).permute(0, 3, 1, 2)  # B, C, H, W
+
+        # Process into attention heatmap
+        heatmap = self.conv_process(transformed)
+
+        return heatmap
+
+
+'''
 # Hiding Network as per the paper's architecture
 class HidingNetwork(nn.Module):
     def __init__(self, img_size=144, window_size=8, embed_dim=96, depths=[6, 6, 6, 6],
@@ -476,6 +532,93 @@ class HidingNetwork(nn.Module):
         x = self.sigmoid(x)
 
         return x
+'''
+# Modify the HidingNetwork to include attention-guided embedding
+class AttentionGuidedHidingNetwork(nn.Module):
+    def __init__(self, img_size=144, window_size=8, embed_dim=128, depths=[2, 2, 2, 2],
+                 num_heads=[8, 8, 8, 8], mlp_ratio=4., qkv_bias=True, qk_scale=None,
+                 drop_rate=0., attn_drop_rate=0., norm_layer=nn.LayerNorm):
+        super().__init__()
+
+        # Add attention heatmap generator
+        self.heatmap_generator = AttentionHeatmapGenerator(dim=embed_dim, num_heads=num_heads[0], window_size=window_size)
+
+        # Rest of the hiding network remains the same
+        # Shallow Information Hiding module
+        self.shallow_conv = nn.Conv2d(6, 64, kernel_size=3, padding=1)  # 3 (cover) + 3 (secret) = 6 channels
+
+        # Deep Information Hiding module
+        self.patch_embed = nn.Conv2d(64, embed_dim, kernel_size=3, padding=1)
+
+        # RSTB blocks
+        self.layers = nn.ModuleList()
+        for i_layer in range(len(depths)):
+            layer = RSTB(
+                dim=embed_dim,
+                input_resolution=(img_size, img_size),
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                window_size=window_size,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                norm_layer=norm_layer,
+                downsample=None  # No downsampling in this architecture
+            )
+            self.layers.append(layer)
+
+        self.norm = norm_layer(embed_dim)
+
+        # Convert back to image space
+        self.conv_out = nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1)
+
+        # Construction Container Image module
+        self.final_conv = nn.Conv2d(64, 3, kernel_size=3, padding=1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, cover_img, secret_img, use_high_attention=True):
+        # Generate attention heatmap from cover image
+        attention_map = self.heatmap_generator(cover_img)
+
+        # Invert heatmap if using low-attention regions
+        '''
+        if not use_high_attention:
+            attention_map = 1 - attention_map
+        '''
+        if use_high_attention:
+        # Scale attention to keep even low values above a minimum threshold
+           attention_map = 0.3 + (0.7 * attention_map)  # Ensures minimum value of 0.3
+
+        else:
+        # Invert and scale
+           attention_map = 0.3 + (0.7 * (1 - attention_map))
+
+        # Prepare secret image with attention weighting
+        # Convert to same dimensions for multiplication
+        secret_expanded = secret_img  # Both are B, 3, H, W
+
+        # Apply attention to secret image (multiply each channel)
+        attention_expanded = attention_map.expand(-1, 3, -1, -1)  # Expand to B, 3, H, W
+        weighted_secret = secret_expanded * attention_expanded
+
+        # Combine cover and weighted secret images
+        x = torch.cat([cover_img, weighted_secret], dim=1)
+
+        # Continue with normal processing
+        x = self.shallow_conv(x)
+        x = self.patch_embed(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.conv_out(x)
+        x = self.final_conv(x)
+        x = self.sigmoid(x)
+
+        return x, attention_map
+
 
  # Extraction Network as per the paper's architecture
 class ExtractionNetwork(nn.Module):
@@ -538,7 +681,7 @@ class ExtractionNetwork(nn.Module):
 
         return x
 
-
+'''
 # Main function to process images
 def process_images(cover_path, secret_path, output_path):
     # Read images
@@ -601,6 +744,117 @@ def process_images(cover_path, secret_path, output_path):
         "container_path": output_path
     }
 
+'''
+
+
+# New function to process images with attention guidance
+def process_images_with_attention(cover_path, secret_path, output_high_path, output_low_path, attention_map_path=None):
+    # Read images
+    cover_img = cv2.imread(cover_path)
+    secret_img = cv2.imread(secret_path)
+
+    # Resize to 144x144 as per the paper
+    cover_img = cv2.resize(cover_img, (144, 144))
+    secret_img = cv2.resize(secret_img, (144, 144))
+
+    # Convert to RGB if in BGR
+    cover_img = cv2.cvtColor(cover_img, cv2.COLOR_BGR2RGB)
+    secret_img = cv2.cvtColor(secret_img, cv2.COLOR_BGR2RGB)
+
+    # Normalize to [0,1]
+    cover_img = cover_img.astype(np.float32) / 255.0
+    secret_img = secret_img.astype(np.float32) / 255.0
+
+    # Convert to torch tensors
+    cover_tensor = torch.from_numpy(cover_img).permute(2, 0, 1).unsqueeze(0)
+    secret_tensor = torch.from_numpy(secret_img).permute(2, 0, 1).unsqueeze(0)
+
+    # Create model
+    model = AttentionGuidedHidingNetwork(img_size=144, window_size=8, embed_dim=96,
+                                         depths=[2, 2, 2, 2], num_heads=[6, 6, 6, 6])
+
+    # Set to eval mode
+    model.eval()
+
+    # Forward pass with high attention regions
+    with torch.no_grad():
+        container_high_tensor, attention_map_high = model(cover_tensor, secret_tensor, use_high_attention=True)
+        container_low_tensor, attention_map_low = model(cover_tensor, secret_tensor, use_high_attention=False)
+
+    # Convert tensors back to numpy
+    container_high_img = container_high_tensor.squeeze(0).permute(1, 2, 0).numpy() * 255.0
+    container_high_img = container_high_img.astype(np.uint8)
+
+    container_low_img = container_low_tensor.squeeze(0).permute(1, 2, 0).numpy() * 255.0
+    container_low_img = container_low_img.astype(np.uint8)
+
+    # Convert to BGR for saving with OpenCV
+    container_high_bgr = cv2.cvtColor(container_high_img, cv2.COLOR_RGB2BGR)
+    container_low_bgr = cv2.cvtColor(container_low_img, cv2.COLOR_RGB2BGR)
+
+    # Save the container images
+    cv2.imwrite(output_high_path, container_high_bgr)
+    cv2.imwrite(output_low_path, container_low_bgr)
+
+    # Save attention maps if requested
+    if attention_map_path:
+        # Convert attention maps to heatmap visualization
+        attention_high_np = attention_map_high.squeeze().cpu().numpy()
+        attention_low_np = attention_map_low.squeeze().cpu().numpy()
+
+        # Create a figure with both attention maps
+        plt.figure(figsize=(12, 6))
+
+        plt.subplot(1, 2, 1)
+        plt.imshow(attention_high_np, cmap='hot')
+        plt.title('High Attention Regions')
+        plt.colorbar()
+
+        plt.subplot(1, 2, 2)
+        plt.imshow(attention_low_np, cmap='hot')
+        plt.title('Low Attention Regions')
+        plt.colorbar()
+
+        plt.tight_layout()
+        plt.savefig(attention_map_path)
+
+    # Calculate metrics for high attention embedding
+    cover_img_uint8 = (cover_img * 255.0).astype(np.uint8)
+    container_high_rgb = cv2.cvtColor(container_high_bgr, cv2.COLOR_BGR2RGB)
+
+    psnr_high = calculate_psnr(cover_img_uint8, container_high_rgb)
+    ssim_high = calculate_ssim(cover_img_uint8, container_high_rgb)
+    mse_high = calculate_mse(cover_img_uint8, container_high_rgb)
+
+    # Calculate metrics for low attention embedding
+    container_low_rgb = cv2.cvtColor(container_low_bgr, cv2.COLOR_BGR2RGB)
+
+    psnr_low = calculate_psnr(cover_img_uint8, container_low_rgb)
+    ssim_low = calculate_ssim(cover_img_uint8, container_low_rgb)
+    mse_low = calculate_mse(cover_img_uint8, container_low_rgb)
+
+    print(f"High Attention Embedding - PSNR: {psnr_high:.2f} dB, SSIM: {ssim_high:.4f}, MSE: {mse_high:.2f}")
+    print(f"Low Attention Embedding - PSNR: {psnr_low:.2f} dB, SSIM: {ssim_low:.4f}, MSE: {mse_low:.2f}")
+
+    return {
+        "high_attention": {
+            "psnr": psnr_high,
+            "ssim": ssim_high,
+            "mse": mse_high,
+            "container_path": output_high_path
+        },
+        "low_attention": {
+            "psnr": psnr_low,
+            "ssim": ssim_low,
+            "mse": mse_low,
+            "container_path": output_low_path
+        },
+        "attention_map_path": attention_map_path
+    }
+
+
+
+'''
 # Function to extract secret image from container image
 def extract_secret_image(container_path, output_path):
     # Read container image
@@ -642,6 +896,51 @@ def extract_secret_image(container_path, output_path):
     return {
         "extracted_secret_path": output_path
     }
+'''
+
+# Modify the extraction function to extract from attention-guided stego images
+def extract_secret_image_with_attention(container_path, output_path):
+    # Read container image
+    container_img = cv2.imread(container_path)
+
+    # Resize to 144x144 if needed
+    container_img = cv2.resize(container_img, (144, 144))
+
+    # Convert to RGB
+    container_img = cv2.cvtColor(container_img, cv2.COLOR_BGR2RGB)
+
+    # Normalize to [0,1]
+    container_img = container_img.astype(np.float32) / 255.0
+
+    # Convert to torch tensor
+    container_tensor = torch.from_numpy(container_img).permute(2, 0, 1).unsqueeze(0)
+
+    # Create extraction model - same as before, no changes needed
+    model = ExtractionNetwork(img_size=144, window_size=8, embed_dim=96,
+                              depths=[2, 2, 2, 2], num_heads=[6, 6, 6, 6])
+
+    # Set to eval mode
+    model.eval()
+
+    # Forward pass
+    with torch.no_grad():
+        extracted_secret_tensor = model(container_tensor)
+
+    # Convert back to numpy for saving
+    extracted_secret_img = extracted_secret_tensor.squeeze(0).permute(1, 2, 0).numpy() * 255.0
+    extracted_secret_img = extracted_secret_img.astype(np.uint8)
+
+    # Convert to BGR for saving with OpenCV
+    extracted_secret_img_bgr = cv2.cvtColor(extracted_secret_img, cv2.COLOR_RGB2BGR)
+
+    # Save the extracted secret image
+    cv2.imwrite(output_path, extracted_secret_img_bgr)
+
+    return {
+        "extracted_secret_path": output_path
+    }
+
+'''
 
 # Complete pipeline function
 def steganography_pipeline(cover_path, secret_path, container_output_path, extracted_secret_output_path):
@@ -709,3 +1008,136 @@ def steganography_pipeline(cover_path, secret_path, container_output_path, extra
             "extracted_secret_path": extract_metrics["extracted_secret_path"]
         }
     }
+
+'''
+
+# Complete pipeline function for attention-guided steganography
+def attention_guided_steganography_pipeline(cover_path, secret_path, output_dir="./output"):
+  
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Define output paths
+    container_high_path = os.path.join(output_dir, "container_high_attention.jpg")
+    container_low_path = os.path.join(output_dir, "container_low_attention.jpg")
+    attention_map_path = os.path.join(output_dir, "attention_maps.jpg")
+    extracted_high_path = os.path.join(output_dir, "extracted_high_attention.jpg")
+    extracted_low_path = os.path.join(output_dir, "extracted_low_attention.jpg")
+
+    # Process images with both high and low attention guidance
+    hide_metrics = process_images_with_attention(
+        cover_path, secret_path,
+        container_high_path, container_low_path,
+        attention_map_path
+    )
+
+    # Extract secret images from both container images
+    extract_high_metrics = extract_secret_image_with_attention(container_high_path, extracted_high_path)
+    extract_low_metrics = extract_secret_image_with_attention(container_low_path, extracted_low_path)
+
+    # Load all images for visualization
+    cover_img = cv2.imread(cover_path)
+    secret_img = cv2.imread(secret_path)
+    container_high_img = cv2.imread(container_high_path)
+    container_low_img = cv2.imread(container_low_path)
+    extracted_high_img = cv2.imread(extracted_high_path)
+    extracted_low_img = cv2.imread(extracted_low_path)
+
+    # Convert BGR to RGB for display
+    cover_img = cv2.cvtColor(cover_img, cv2.COLOR_BGR2RGB)
+    secret_img = cv2.cvtColor(secret_img, cv2.COLOR_BGR2RGB)
+    container_high_img = cv2.cvtColor(container_high_img, cv2.COLOR_BGR2RGB)
+    container_low_img = cv2.cvtColor(container_low_img, cv2.COLOR_BGR2RGB)
+    extracted_high_img = cv2.cvtColor(extracted_high_img, cv2.COLOR_BGR2RGB)
+    extracted_low_img = cv2.cvtColor(extracted_low_img, cv2.COLOR_BGR2RGB)
+
+    # Resize all images to 144x144 for fair comparison
+    cover_img = cv2.resize(cover_img, (144, 144))
+    secret_img = cv2.resize(secret_img, (144, 144))
+    container_high_img = cv2.resize(container_high_img, (144, 144))
+    container_low_img = cv2.resize(container_low_img, (144, 144))
+    extracted_high_img = cv2.resize(extracted_high_img, (144, 144))
+    extracted_low_img = cv2.resize(extracted_low_img, (144, 144))
+
+    # Calculate extraction metrics (secret vs extracted)
+    psnr_high_extract = calculate_psnr(secret_img, extracted_high_img)
+    ssim_high_extract = calculate_ssim(secret_img, extracted_high_img)
+    mse_high_extract = calculate_mse(secret_img, extracted_high_img)
+
+    psnr_low_extract = calculate_psnr(secret_img, extracted_low_img)
+    ssim_low_extract = calculate_ssim(secret_img, extracted_low_img)
+    mse_low_extract = calculate_mse(secret_img, extracted_low_img)
+
+    # Print results
+    print("\nHigh Attention Embedding Results:")
+    print(f"Container Image - PSNR: {hide_metrics['high_attention']['psnr']:.2f}dB, SSIM: {hide_metrics['high_attention']['ssim']:.4f}")
+    print(f"Extracted Secret - PSNR: {psnr_high_extract:.2f}dB, SSIM: {ssim_high_extract:.4f}")
+
+    print("\nLow Attention Embedding Results:")
+    print(f"Container Image - PSNR: {hide_metrics['low_attention']['psnr']:.2f}dB, SSIM: {hide_metrics['low_attention']['ssim']:.4f}")
+    print(f"Extracted Secret - PSNR: {psnr_low_extract:.2f}dB, SSIM: {ssim_low_extract:.4f}")
+
+    # Display all images
+    fig, axes = plt.subplots(3, 2, figsize=(14, 18))
+
+    axes[0, 0].imshow(cover_img)
+    axes[0, 0].set_title("Cover Image")
+    axes[0, 0].axis("off")
+
+    axes[0, 1].imshow(secret_img)
+    axes[0, 1].set_title("Secret Image")
+    axes[0, 1].axis("off")
+
+    axes[1, 0].imshow(container_high_img)
+    axes[1, 0].set_title(f"Container Image (High Attention)\nPSNR: {hide_metrics['high_attention']['psnr']:.2f}dB, SSIM: {hide_metrics['high_attention']['ssim']:.4f}")
+    axes[1, 0].axis("off")
+
+    axes[1, 1].imshow(container_low_img)
+    axes[1, 1].set_title(f"Container Image (Low Attention)\nPSNR: {hide_metrics['low_attention']['psnr']:.2f}dB, SSIM: {hide_metrics['low_attention']['ssim']:.4f}")
+    axes[1, 1].axis("off")
+
+    axes[2, 0].imshow(extracted_high_img)
+    axes[2, 0].set_title(f"Extracted Secret (High Attention)\nPSNR: {psnr_high_extract:.2f}dB, SSIM: {ssim_high_extract:.4f}")
+    axes[2, 0].axis("off")
+
+    axes[2, 1].imshow(extracted_low_img)
+    axes[2, 1].set_title(f"Extracted Secret (Low Attention)\nPSNR: {psnr_low_extract:.2f}dB, SSIM: {ssim_low_extract:.4f}")
+    axes[2, 1].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "comparison_results.jpg"))
+    plt.show()
+
+    # Return all metrics for further analysis
+    return {
+        "high_attention": {
+            "container": {
+                "psnr": hide_metrics['high_attention']['psnr'],
+                "ssim": hide_metrics['high_attention']['ssim'],
+                "mse": hide_metrics['high_attention']['mse'],
+                "path": container_high_path
+            },
+            "extracted": {
+                "psnr": psnr_high_extract,
+                "ssim": ssim_high_extract,
+                "mse": mse_high_extract,
+                "path": extracted_high_path
+            }
+        },
+        "low_attention": {
+            "container": {
+                "psnr": hide_metrics['low_attention']['psnr'],
+                "ssim": hide_metrics['low_attention']['ssim'],
+                "mse": hide_metrics['low_attention']['mse'],
+                "path": container_low_path
+            },
+            "extracted": {
+                "psnr": psnr_low_extract,
+                "ssim": ssim_low_extract,
+                "mse": mse_low_extract,
+                "path": extracted_low_path
+            }
+        },
+        "attention_map_path": attention_map_path,
+        "comparison_path": os.path.join(output_dir, "comparison_results.jpg")
+    }
+

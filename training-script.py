@@ -17,7 +17,7 @@ import torchvision
 import torch
 
 # If they're in the same file, you can import them directly
-from swin_model import HidingNetwork, ExtractionNetwork, calculate_psnr, calculate_ssim, calculate_mse
+from swin_model import  AttentionGuidedHidingNetwork, ExtractionNetwork, calculate_psnr, calculate_ssim, calculate_mse
 
 
 # Set random seeds for reproducibility
@@ -420,7 +420,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
     # Create models
-    hiding_net = HidingNetwork(
+    hiding_net = AttentionGuidedHidingNetwork(
         img_size=args.img_size,
         window_size=args.window_size,
         embed_dim=args.embed_dim,
