@@ -422,10 +422,13 @@ class AttentionHeatmapGenerator(nn.Module):
         # Initial feature extraction
         self.init_conv = nn.Conv2d(3, dim, kernel_size=3, padding=1)
 
+        # Define input resolution properly
+        self.input_resolution = (img_size, img_size)
+
         # Use proper Swin Transformer block
         self.swin_block = SwinTransformerBlock(
             dim=dim,
-            input_resolution=(img_size, img_size),
+            input_resolution=self.input_resolution,
             num_heads=num_heads,
             window_size=window_size,
             shift_size=window_size // 2  # Add proper shift size
@@ -446,12 +449,15 @@ class AttentionHeatmapGenerator(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
+        
+        # Ensure input dimensions match what we initialized with
+        assert H == self.img_size and W == self.img_size, f"Input size ({H}x{W}) doesn't match expected size ({self.img_size}x{self.img_size})"
 
         # Extract features
-        features = self.init_conv(x)
+        features = self.init_conv(x)  # B, dim, H, W
 
         # Reshape for Swin Transformer
-        features_reshaped = features.flatten(2).transpose(1, 2)  # B, H*W, C
+        features_reshaped = features.flatten(2).transpose(1, 2)  # B, H*W, dim
 
         # Apply Swin Transformer
         transformed = self.swin_block(features_reshaped)
@@ -459,8 +465,8 @@ class AttentionHeatmapGenerator(nn.Module):
         # Normalize
         transformed = self.norm(transformed)
 
-        # Reshape back to spatial form
-        transformed = transformed.view(B, H, W, -1).permute(0, 3, 1, 2)  # B, C, H, W
+        # Reshape back to spatial form - this is the key fix
+        transformed = transformed.view(B, H, W, -1).permute(0, 3, 1, 2)  # B, dim, H, W
 
         # Process into attention heatmap
         heatmap = self.conv_process(transformed)
