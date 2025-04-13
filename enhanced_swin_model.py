@@ -693,20 +693,20 @@ class EnhancedSteganographySystem(nn.Module):
         return normalized
     
     def forward_hide(self, cover_img, secret_img, use_high_attention=True, return_maps=False):
-    """
-    Forward pass for hiding process
-    """
-    # Generate attention maps for both images
-    cover_attention = self.cover_attention(cover_img)
-    secret_attention = self.secret_attention(secret_img)
-    
-    # Compute embedding map
-    embedding_map = self.compute_embedding_map(
-        cover_attention, secret_attention, use_high_attention
-    )
-    
-    # Generate container image
-    container = self.hiding_network(cover_img, secret_img, embedding_map)
+        """
+        Forward pass for hiding process
+        """
+        # Generate attention maps for both images
+        cover_attention = self.cover_attention(cover_img)
+        secret_attention = self.secret_attention(secret_img)
+        
+        # Compute embedding map
+        embedding_map = self.compute_embedding_map(
+            cover_attention, secret_attention, use_high_attention
+        )
+        
+        # Generate container image
+        container = self.hiding_network(cover_img, secret_img, embedding_map)
     
     return container, cover_attention, secret_attention, embedding_map
     
