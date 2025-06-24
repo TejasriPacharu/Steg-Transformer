@@ -1,21 +1,46 @@
-# The project consists of 
-debug_visualizations                   -> results of the after excuting the code
-tiny-imagenet-200                      -> dataset
-train                                  -> part of the dataset picked up for training small
-val                                    -> part of the dataset picked up for validating small
-enhanced_swin_model.py                 -> code of our model
-requirements.txt                       -> required dependencies to run the project locally
-tiny-imagenet-downloader.py            -> for downloading the tiny imagenet dataset
-train_small.sh                         -> shell script written to automatically train the model with small subset of the dataset
-traning-run-script.sh                  -> shell script written for training the model on the complete dataset
-training-script.py                     -> code for training the model
+# Enhanced Swin Transformer Model
+
+A deep learning project implementing an enhanced Swin Transformer model trained on the Tiny-ImageNet dataset.
 
 
-# Future scope and improvements
-# For future enhancement:
-# 1. Add data augmentation for better generalization
-# 2. Implement robustness against common image modifications (JPEG compression, noise)
-# 3. Add progressive training strategy (curriculum learning)
-# 4. Implement adversarial training against steganalysis detectors
 
- 
+## Project Structure
+
+```
+.
+├── debug_visualizations/         # Results after executing the code
+├── tiny-imagenet-200/            # Complete dataset directory
+├── train/                        # Subset of the dataset for training
+├── val/                          # Subset of the dataset for validation
+├── enhanced_swin_model.py        # Swin Transformer model implementation
+├── requirements.txt              # Project dependencies
+├── tiny-imagenet-downloader.py   # Script to download the dataset
+├── train_small.sh                # Script for training on a small subset
+├── traning-run-script.sh         # Script for full dataset training
+└── training-script.py            # Main training code
+```
+
+## Model Architecture
+
+The Enhanced Swin Transformer implemented in `enhanced_swin_model.py` builds upon the original Swin Transformer architecture with several improvements:
+
+- Hierarchical feature representation
+- Shifted window-based self-attention
+- Efficient computation with linear complexity to image size
+- Improved patch merging and embedding layers
+
+## Future Enhancements
+
+The project roadmap includes:
+
+1. **Data Augmentation**: Implementing diverse data augmentation techniques to improve model generalization capabilities.
+
+2. **Robustness Enhancements**: Adding resistance against common image modifications such as JPEG compression and noise to increase real-world applicability.
+
+3. **Progressive Training Strategy**: Implementing curriculum learning to train the model progressively from simple to complex examples.
+
+4. **Adversarial Training**: Incorporating adversarial training methods against steganalysis detectors to improve model robustness.
+
+## Results
+
+Training results and visualization outputs can be found in the `debug_visualizations` directory after running the training scripts.
