@@ -219,31 +219,42 @@ def calculate_ssim(img1, img2):
     return ssim
 
 
-def validate(steg_system, dataloader, device, alpha=0.7, beta=0.3, use_high_attention=True):
+def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_attention=True):
     """
-    Validate the steganography system and calculate metrics
+    Validate the model using the enhanced steganography system
+    
+    Args:
+        steg_system: EnhancedSteganographySystem model
+        dataloader: DataLoader for the validation set
+        device: Device to use (cuda/cpu)
+        alpha: Weight for cover-container loss
+        beta: Weight for secret-extracted loss
+        use_high_attention: Whether to use high attention regions (True) or low attention regions (False)
+    
+    Returns:
+        Validation metrics
     """
     steg_system.eval()
     
-    val_loss = 0.0
-    val_hiding_loss = 0.0
-    val_extraction_loss = 0.0
-    
+    total_loss = 0.0
+    total_hiding_loss = 0.0
+    total_extraction_loss = 0.0
     total_psnr_container = 0.0
     total_psnr_secret = 0.0
     total_ssim_container = 0.0
     total_ssim_secret = 0.0
     
-    criterion = CombinedLoss(alpha=alpha)
-    total_samples = 0
+    criterion = CombinedLoss(alpha=0.7)
     
     with torch.no_grad():
-        for i, (cover_imgs, secret_imgs) in enumerate(dataloader):
+        progress_bar = tqdm(dataloader, desc='Validating')
+        
+        for i, (cover_imgs, secret_imgs) in enumerate(progress_bar):
             cover_imgs = cover_imgs.to(device)
             secret_imgs = secret_imgs.to(device)
             
-            # Forward pass
-            container_imgs, _, _, _ = steg_system.forward_hide(
+            # Forward pass using the enhanced system
+            container_imgs, cover_atn, secret_atn, embed_map = steg_system.forward_hide(
                 cover_imgs, secret_imgs, use_high_attention=use_high_attention
             )
             extracted_secrets = steg_system.forward_extract(container_imgs)
@@ -251,47 +262,198 @@ def validate(steg_system, dataloader, device, alpha=0.7, beta=0.3, use_high_atte
             # Calculate losses
             hiding_loss = criterion(container_imgs, cover_imgs)
             extraction_loss = criterion(extracted_secrets, secret_imgs)
+            
+            # Combined loss
             loss = alpha * hiding_loss + beta * extraction_loss
             
-            val_loss += loss.item() * cover_imgs.size(0)
-            val_hiding_loss += hiding_loss.item() * cover_imgs.size(0)
-            val_extraction_loss += extraction_loss.item() * cover_imgs.size(0)
-            
-            # Calculate PSNR and SSIM for each image
+            # Calculate metrics
             for j in range(cover_imgs.size(0)):
-                # Convert tensors to numpy for metric calculation
+                # Convert to numpy for PSNR and SSIM calculation
                 cover_np = cover_imgs[j].cpu().numpy().transpose(1, 2, 0)
                 container_np = container_imgs[j].cpu().numpy().transpose(1, 2, 0)
                 secret_np = secret_imgs[j].cpu().numpy().transpose(1, 2, 0)
                 extracted_np = extracted_secrets[j].cpu().numpy().transpose(1, 2, 0)
                 
-                # Calculate metrics
+                # Calculate PSNR (normalized [0,1] images)
                 psnr_container = calculate_psnr(cover_np, container_np)
                 psnr_secret = calculate_psnr(secret_np, extracted_np)
+                
+                # Calculate SSIM (normalized [0,1] images)
                 ssim_container = calculate_ssim(cover_np, container_np)
                 ssim_secret = calculate_ssim(secret_np, extracted_np)
                 
-                # Accumulate
                 total_psnr_container += psnr_container
                 total_psnr_secret += psnr_secret
                 total_ssim_container += ssim_container
                 total_ssim_secret += ssim_secret
             
-            total_samples += cover_imgs.size(0)
+            # Update stats
+            total_loss += loss.item()
+            total_hiding_loss += hiding_loss.item()
+            total_extraction_loss += extraction_loss.item()
+            
+            # Update progress bar
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'psnr_c': f'{psnr_container:.2f}',
+                'psnr_s': f'{psnr_secret:.2f}'
+            })
     
     # Calculate averages
-    avg_loss = val_loss / total_samples
-    avg_hiding_loss = val_hiding_loss / total_samples
-    avg_extraction_loss = val_extraction_loss / total_samples
-    
-    avg_psnr_container = total_psnr_container / total_samples
-    avg_psnr_secret = total_psnr_secret / total_samples
-    avg_ssim_container = total_ssim_container / total_samples
-    avg_ssim_secret = total_ssim_secret / total_samples
+    n_samples = len(dataloader.dataset)
+    avg_loss = total_loss / len(dataloader)
+    avg_hiding_loss = total_hiding_loss / len(dataloader)
+    avg_extraction_loss = total_extraction_loss / len(dataloader)
+    avg_psnr_container = total_psnr_container / n_samples
+    avg_psnr_secret = total_psnr_secret / n_samples
+    avg_ssim_container = total_ssim_container / n_samples
+    avg_ssim_secret = total_ssim_secret / n_samples
     
     return (avg_loss, avg_hiding_loss, avg_extraction_loss, 
             avg_psnr_container, avg_psnr_secret, 
             avg_ssim_container, avg_ssim_secret)
+
+def pretrain_extraction(steg_system, train_loader, val_loader, device, num_epochs=5, lr=0.0002):
+    """
+    Pretrain the extraction network alone to improve its base capabilities
+    before joint training with the hiding network.
+    
+    Args:
+        steg_system: The complete steganography system
+        train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data
+        device: Device to run training on
+        num_epochs: Number of pretraining epochs
+        lr: Learning rate for pretraining
+    """
+    print("Starting extraction network pretraining...")
+    
+    # We'll only train the extraction network
+    # First, set all networks to eval mode
+    steg_system.eval()
+    
+    # Then set extraction network to train mode
+    steg_system.extraction_network.train()
+    
+    # Define optimizer just for extraction network parameters
+    optimizer = optim.AdamW(steg_system.extraction_network.parameters(), lr=lr)
+    
+    # Define criterion (combined loss)
+    criterion = CombinedLoss(alpha=1.0)  # Full weight on reconstruction quality
+    
+    # Track best validation loss
+    best_val_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        # Training phase
+        steg_system.extraction_network.train()
+        train_loss = 0.0
+        
+        progress_bar = tqdm(train_loader, desc=f'Pretraining Epoch {epoch+1}/{num_epochs}')
+        
+        for i, (_, secret_imgs) in enumerate(progress_bar):
+            # We only need the secret images for pretraining the extractor
+            secret_imgs = secret_imgs.to(device)
+            
+            optimizer.zero_grad()
+            
+            # Generate noisy container images (simulating the output of hiding network)
+            # This helps the extraction network learn to be robust to various distortions
+            with torch.no_grad():
+                # First get container images with the current hiding network
+                container_imgs, _, _, _ = steg_system.forward_hide(
+                    secret_imgs, secret_imgs, use_high_attention=True
+                )
+                
+                # Add some noise to create more challenging examples
+                noise_level = 0.05 * (1.0 - epoch / num_epochs)  # Reduce noise over time
+                noise = torch.randn_like(container_imgs) * noise_level
+                noisy_containers = torch.clamp(container_imgs + noise, 0, 1)
+            
+            # Extract the secrets from the noisy containers
+            extracted_secrets = steg_system.extraction_network(noisy_containers)
+            
+            # Calculate loss
+            loss = criterion(extracted_secrets, secret_imgs)
+            
+            # Backward and optimize
+            loss.backward()
+            optimizer.step()
+            
+            # Update stats
+            train_loss += loss.item()
+            
+            # Update progress bar
+            progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        avg_train_loss = train_loss / len(train_loader)
+        
+        # Validation phase
+        steg_system.extraction_network.eval()
+        val_loss = 0.0
+        val_psnr = 0.0
+        val_ssim = 0.0
+        
+        with torch.no_grad():
+            for i, (_, secret_imgs) in enumerate(val_loader):
+                secret_imgs = secret_imgs.to(device)
+                
+                # Create containers with hiding network
+                container_imgs, _, _, _ = steg_system.forward_hide(
+                    secret_imgs, secret_imgs, use_high_attention=True
+                )
+                
+                # Extract the secrets
+                extracted_secrets = steg_system.extraction_network(container_imgs)
+                
+                # Calculate metrics
+                loss = criterion(extracted_secrets, secret_imgs)
+                val_loss += loss.item()
+                
+                # Calculate PSNR and SSIM for batch
+                for j in range(secret_imgs.size(0)):
+                    original = secret_imgs[j].cpu().numpy().transpose(1, 2, 0)
+                    extracted = extracted_secrets[j].cpu().numpy().transpose(1, 2, 0)
+                    
+                    val_psnr += calculate_psnr(original, extracted)
+                    val_ssim += calculate_ssim(original, extracted)
+        
+        # Calculate averages
+        avg_val_loss = val_loss / len(val_loader)
+        avg_val_psnr = val_psnr / (len(val_loader) * val_loader.batch_size)
+        avg_val_ssim = val_ssim / (len(val_loader) * val_loader.batch_size)
+        
+        # Print results
+        print(f"Pretraining Epoch {epoch+1}/{num_epochs}:")
+        print(f"  Train Loss: {avg_train_loss:.4f}")
+        print(f"  Val Loss: {avg_val_loss:.4f}")
+        print(f"  Val PSNR: {avg_val_psnr:.2f}dB")
+        print(f"  Val SSIM: {avg_val_ssim:.4f}")
+        
+        # Save if this is the best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            print(f"  New best validation loss: {best_val_loss:.4f}")
+            
+            # Save the pretrained extraction network
+            torch.save({
+                'epoch': epoch + 1,
+                'extraction_network_state_dict': steg_system.extraction_network.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
+                'val_psnr': avg_val_psnr,
+                'val_ssim': avg_val_ssim,
+            }, 'pretrained_extraction_network.pth')
+    
+    print("Pretraining completed!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    
+    # Load the best model from pretraining
+    pretrained_checkpoint = torch.load('pretrained_extraction_network.pth')
+    steg_system.extraction_network.load_state_dict(pretrained_checkpoint['extraction_network_state_dict'])
+    
+    # Return the model to its normal state (all components trainable)
+    steg_system.train()
 
 
 def visualize_results(steg_system, dataloader, device, save_dir, epoch, 
@@ -388,7 +550,7 @@ def save_checkpoint(checkpoint_data, filepath):
 
 
 def train_epoch(steg_system, dataloader, optimizer, device, 
-                alpha=0.3, beta=0.7, use_high_attention=True):
+                alpha=0.3, beta=0.7, use_high_attention=True, train_both=False):
     """
     Train for one epoch using the enhanced steganography system with attention diversity loss
     """
@@ -398,6 +560,13 @@ def train_epoch(steg_system, dataloader, optimizer, device,
     total_hiding_loss = 0.0
     total_extraction_loss = 0.0
     total_attention_loss = 0.0
+    
+    # For tracking metrics when training with both attention modes
+    if train_both:
+        opposite_total_loss = 0.0
+        opposite_total_hiding_loss = 0.0
+        opposite_total_extraction_loss = 0.0
+        opposite_total_attention_loss = 0.0
     
     criterion = CombinedLoss(alpha=0.7)
     
@@ -409,49 +578,99 @@ def train_epoch(steg_system, dataloader, optimizer, device,
         
         optimizer.zero_grad()
         
+        # Process with primary attention mode (high or low based on use_high_attention)
         container_imgs, cover_attention, secret_attention, embedding_map = steg_system.forward_hide(
             cover_imgs, secret_imgs, use_high_attention=use_high_attention
         )
         extracted_secrets = steg_system.forward_extract(container_imgs)
         
-        # Calculate standard losses
+        # Calculate standard losses for primary mode
         hiding_loss = criterion(container_imgs, cover_imgs)
         extraction_loss = criterion(extracted_secrets, secret_imgs)
         perceptual_loss = F.l1_loss(extracted_secrets, secret_imgs)
         
-        # Add attention diversity loss
-        # Penalize uniform attention maps (encourage meaningful attention)
+        # Add attention diversity loss for primary mode
         cover_std = cover_attention.view(cover_attention.size(0), -1).std(dim=1).mean()
         secret_std = secret_attention.view(secret_attention.size(0), -1).std(dim=1).mean()
         attention_loss = torch.exp(-5 * cover_std) + torch.exp(-5 * secret_std)
         
-        # Combined loss with attention diversity
+        # Combined loss for primary mode
         loss = alpha * hiding_loss + beta * (extraction_loss + 0.5 * perceptual_loss) + 0.1 * attention_loss
         
-        loss.backward()
+        # Process with opposite attention mode if training both
+        if train_both:
+            # Use the same cover and secret images but with opposite attention mode
+            opposite_container_imgs, opposite_cover_attention, opposite_secret_attention, opposite_embedding_map = steg_system.forward_hide(
+                cover_imgs, secret_imgs, use_high_attention=(not use_high_attention)
+            )
+            opposite_extracted_secrets = steg_system.forward_extract(opposite_container_imgs)
+            
+            # Calculate losses for opposite mode
+            opposite_hiding_loss = criterion(opposite_container_imgs, cover_imgs)
+            opposite_extraction_loss = criterion(opposite_extracted_secrets, secret_imgs)
+            opposite_perceptual_loss = F.l1_loss(opposite_extracted_secrets, secret_imgs)
+            
+            # Attention diversity loss for opposite mode
+            opposite_cover_std = opposite_cover_attention.view(opposite_cover_attention.size(0), -1).std(dim=1).mean()
+            opposite_secret_std = opposite_secret_attention.view(opposite_secret_attention.size(0), -1).std(dim=1).mean()
+            opposite_attention_loss = torch.exp(-5 * opposite_cover_std) + torch.exp(-5 * opposite_secret_std)
+            
+            # Combined loss for opposite mode
+            opposite_loss = alpha * opposite_hiding_loss + beta * (opposite_extraction_loss + 0.5 * opposite_perceptual_loss) + 0.1 * opposite_attention_loss
+            
+            # Backward both losses
+            loss.backward()
+            opposite_loss.backward()
+            
+            # Update opposite mode stats
+            opposite_total_loss += opposite_loss.item()
+            opposite_total_hiding_loss += opposite_hiding_loss.item()
+            opposite_total_extraction_loss += opposite_extraction_loss.item()
+            opposite_total_attention_loss += opposite_attention_loss.item()
+        else:
+            # Regular backward pass for single mode
+            loss.backward()
+        
         optimizer.step()
         
-        # Update stats
+        # Update stats for primary mode
         total_loss += loss.item()
         total_hiding_loss += hiding_loss.item()
         total_extraction_loss += extraction_loss.item()
         total_attention_loss += attention_loss.item()
         
         # Update progress bar
-        progress_bar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'hiding': f'{hiding_loss.item():.4f}',
-            'extract': f'{extraction_loss.item():.4f}',
-            'attn': f'{attention_loss.item():.4f}'
-        })
+        if train_both:
+            progress_bar.set_postfix({
+                'loss': f'{(loss.item() + opposite_loss.item()) / 2:.4f}',
+                'hiding': f'{(hiding_loss.item() + opposite_hiding_loss.item()) / 2:.4f}',
+                'extract': f'{(extraction_loss.item() + opposite_extraction_loss.item()) / 2:.4f}'
+            })
+        else:
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'hiding': f'{hiding_loss.item():.4f}',
+                'extract': f'{extraction_loss.item():.4f}'
+            })
     
-    # Calculate average losses
+    # Calculate average losses for primary mode
     avg_loss = total_loss / len(dataloader)
     avg_hiding_loss = total_hiding_loss / len(dataloader)
     avg_extraction_loss = total_extraction_loss / len(dataloader)
-    avg_attention_loss = total_attention_loss / len(dataloader)
     
-    return avg_loss, avg_hiding_loss, avg_extraction_loss
+    results = (avg_loss, avg_hiding_loss, avg_extraction_loss)
+    
+    # Calculate average losses for opposite mode if applicable
+    if train_both:
+        opposite_avg_loss = opposite_total_loss / len(dataloader)
+        opposite_avg_hiding_loss = opposite_total_hiding_loss / len(dataloader)
+        opposite_avg_extraction_loss = opposite_total_extraction_loss / len(dataloader)
+        
+        opposite_results = (opposite_avg_loss, opposite_avg_hiding_loss, opposite_avg_extraction_loss)
+        return results, opposite_results
+    
+    return results
+
 
 def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_attention=True):
     """
@@ -952,17 +1171,8 @@ def main():
         train_loss, train_hiding_loss, train_extraction_loss = train_epoch(
             steg_system, train_loader, optimizer, device, 
             alpha=current_alpha, beta=current_beta, 
-            use_high_attention=args.use_high_attention
+            use_high_attention=args.use_high_attention, train_both=args.train_both
         )
-        
-        # If train_both flag is set, also train with the opposite attention mode
-        if args.train_both:
-            print(f"Training with {'low' if args.use_high_attention else 'high'} attention regions...")
-            opposite_train_loss, opposite_train_hiding_loss, opposite_train_extraction_loss = train_epoch(
-                steg_system, train_loader, optimizer, device, 
-                alpha=current_alpha, beta=current_beta, 
-                use_high_attention=not args.use_high_attention
-            )
         
         # Validate with specified attention mode
         val_metrics = validate(
@@ -1005,7 +1215,7 @@ def main():
         if args.train_both:
             opposite_mode = "low" if args.use_high_attention else "high"
             print(f"\n{opposite_mode.capitalize()} Attention Mode Results:")
-            print(f"Train Loss: {opposite_train_loss:.4f}, Hiding Loss: {opposite_train_hiding_loss:.4f}, Extraction Loss: {opposite_train_extraction_loss:.4f}")
+            print(f"Train Loss: {train_loss:.4f}, Hiding Loss: {train_hiding_loss:.4f}, Extraction Loss: {train_extraction_loss:.4f}")
             print(f"Val Loss: {opposite_val_loss:.4f}, Hiding Loss: {opposite_val_hiding_loss:.4f}, Extraction Loss: {opposite_val_extraction_loss:.4f}")
             print(f"PSNR Container: {opposite_val_psnr_container:.2f}dB, PSNR Secret: {opposite_val_psnr_secret:.2f}dB")
             print(f"SSIM Container: {opposite_val_ssim_container:.4f}, SSIM Secret: {opposite_val_ssim_secret:.4f}")
@@ -1063,7 +1273,7 @@ def main():
                     'model_state_dict': steg_system.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
-                    'train_loss': opposite_train_loss,
+                    'train_loss': train_loss,
                     'val_loss': opposite_val_loss,
                     'val_psnr_container': opposite_val_psnr_container,
                     'val_psnr_secret': opposite_val_psnr_secret,
