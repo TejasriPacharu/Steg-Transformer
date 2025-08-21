@@ -1,7 +1,7 @@
 #!/bin/bash
 echo "Starting lightweight debug training run..."
 python training-script.py \
-    --data_dir=./ \
+    --data_dir=./dataset \
     --batch_size=4 \
     --lr=0.001 \
     --epochs=10 \
