@@ -15,4 +15,4 @@ python training-script.py \
     --num_heads 2 2 2 2 \
     --depths 2 2 2 2 \
     --pretrain \
-    --pretrain_epochs=3
+    --pretrain_epochs=5

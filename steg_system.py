@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import matplotlib.pyplot as plt
 
-from attention_modules import DualAttentionHeatmapGenerator, AttentionHeatmapGenerator
+from attention_modules import DualAttentionHeatmapGenerator
 from network_modules import EnhancedHidingNetwork, EnhancedExtractionNetwork
 from utils import calculate_psnr, calculate_ssim, to_2tuple
 
