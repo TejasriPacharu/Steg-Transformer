@@ -47,10 +47,12 @@ class EnhancedSteganographySystem(nn.Module):
         """
         if use_high_attention:
             # Embed in regions where cover has high attention AND secret has significant content
-            embedding_strength = cover_attention * secret_attention
+            # Increase the influence of secret content in the embedding decision
+            embedding_strength = cover_attention * (secret_attention + 0.3)
         else:
             # Embed in regions where cover has low attention BUT secret has significant content
-            embedding_strength = (1 - cover_attention) * secret_attention
+            # Increase minimum embedding capacity in low-attention regions
+            embedding_strength = (1 - cover_attention) * (secret_attention + 0.3)
             
         # Apply adaptive normalization for better balance
         embedding_strength = self.normalize_embedding_strength(embedding_strength)
@@ -62,8 +64,9 @@ class EnhancedSteganographySystem(nn.Module):
         Adaptive scaling to ensure enough embedding capacity
         while maintaining higher visual quality
         """
-        min_strength = 0.4  # Minimum embedding strength 
-        max_strength = 0.9  # Maximum embedding strength
+        # Increase minimum strength to ensure adequate information preservation
+        min_strength = 0.5  # Increased from 0.4
+        max_strength = 0.95  # Increased from 0.9
         
         # Normalize to use full range while preserving relative values
         B, C, H, W = strength_map.shape
@@ -77,6 +80,11 @@ class EnhancedSteganographySystem(nn.Module):
         normalized = min_strength + (max_strength - min_strength) * (
             (strength_map - min_vals) / (max_vals - min_vals + 1e-8)
         )
+        
+        # Add small constant to ensure minimum embedding everywhere
+        # This ensures all parts of the secret have some representation
+        normalized = normalized + 0.05
+        normalized = torch.clamp(normalized, 0, max_strength)
         
         return normalized
     

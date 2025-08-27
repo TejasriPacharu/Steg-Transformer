@@ -43,22 +43,36 @@ class EnhancedHidingNetwork(nn.Module):
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2)
         )
+
+        self.secret_feat_extractor = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2)
+        )
+        
         
         # Final processing with skip connection from cover features
         self.final_conv = nn.Sequential(
-            nn.Conv2d(embed_dim + 32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(embed_dim + 32 + 32, 96, kernel_size=3, padding=1),  # Added secret features
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(96, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(32, 3, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
+
+        self.alpha = nn.Parameter(torch.tensor(0.5))
     
     def forward(self, cover_img, secret_img, embedding_map):
         B, C, H, W = cover_img.shape
         
         # Extract features from cover for later skip connection
         cover_features = self.cover_feat_extractor(cover_img)
+
+        secret_features = self.secret_feat_extractor(secret_img)
         
         # Expand embedding map to match secret channels for element-wise multiplication
         embedding_map_expanded = embedding_map.expand(-1, 3, -1, -1)
@@ -77,15 +91,19 @@ class EnhancedHidingNetwork(nn.Module):
             x = layer(x)
         
         # Combine with cover features for better quality reconstruction
-        x = torch.cat([x, cover_features], dim=1)
+        x = torch.cat([x, cover_features, secret_features], dim=1)
+
+        residual = self.final_conv(x)
+
+        alpha_bounded = torch.sigmoid(self.alpha)
         
         # Final processing
-        container = self.final_conv(x)
+        container = alpha_bounded * cover_img + (1 - alpha_bounded) * residual
         
         # Apply residual connection for cover preservation
         # This is key to improving PSNR/SSIM
-        alpha = 0.5  # Balance parameter (can be made trainable)
-        container = alpha * cover_img + (1 - alpha) * container
+        secret_contribution = 0.05 * embedding_map_expanded * secret_img
+        container = torch.clamp(container + secret_contribution, 0, 1)
         
         return container
 
@@ -124,17 +142,35 @@ class EnhancedExtractionNetwork(nn.Module):
                 nn.Conv2d(embed_dim, 16, kernel_size=1)  # Projection for skip features
             )
         
+        # Add attention mechanism to focus on areas with embedded data
+        self.attention_gate = nn.Sequential(
+            nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
         # Convert back to image space
         self.conv_out = nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1)
         
         # Final processing with concatenated skip features
         self.final_conv = nn.Sequential(
-            nn.Conv2d(64 + 16 * len(depths), 64, kernel_size=3, padding=1),
+            nn.Conv2d(64 + 16 * len(depths), 128, kernel_size=3, padding=1),  # Increased width
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # Increased width
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(32, 3, kernel_size=3, padding=1),
             nn.Sigmoid()
+        )
+        
+        # Add residual refinement layer for final detail enhancement
+        self.refine = nn.Sequential(
+            nn.Conv2d(6, 32, kernel_size=3, padding=1),  # Input: concat of initial extraction and container
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 3, kernel_size=3, padding=1),
+            nn.Tanh()  # Tanh to allow positive and negative refinements
         )
     
     def forward(self, container_img):
@@ -148,6 +184,10 @@ class EnhancedExtractionNetwork(nn.Module):
             x = layer(x)
             skip_outputs.append(self.skip_features[i](x_prev))
         
+        # Generate attention map for focusing on embedded data
+        attention_map = self.attention_gate(x)
+        x = x * attention_map + x  # Apply soft attention (residual)
+        
         # Convert to image space
         x = self.conv_out(x)
         
@@ -155,6 +195,14 @@ class EnhancedExtractionNetwork(nn.Module):
         for skip in skip_outputs:
             x = torch.cat([x, skip], dim=1)
             
-        # Final processing to generate secret image
-        secret = self.final_conv(x)
-        return secret
+        # First-pass extraction
+        initial_secret = self.final_conv(x)
+        
+        # Refinement using both the container and initial extraction
+        refine_input = torch.cat([initial_secret, container_img], dim=1)
+        refinement = self.refine(refine_input)
+        
+        # Apply refinement (constrained to avoid dramatic changes)
+        final_secret = torch.clamp(initial_secret + 0.1 * refinement, 0, 1)
+        
+        return final_secret

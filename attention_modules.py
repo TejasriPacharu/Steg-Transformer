@@ -19,6 +19,9 @@ class DualAttentionHeatmapGenerator(nn.Module):
             nn.Conv2d(3, dim//2, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(dim//2, dim, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            # Add additional layer for better feature extraction
+            nn.Conv2d(dim, dim, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2)
         )
         
@@ -37,11 +40,27 @@ class DualAttentionHeatmapGenerator(nn.Module):
                 num_heads=num_heads,
                 window_size=window_size,
                 shift_size=window_size // 2
+            ),
+            # Add a third block for more capacity
+            SwinTransformerBlock(
+                dim=dim,
+                input_resolution=self.input_resolution,
+                num_heads=num_heads,
+                window_size=window_size,
+                shift_size=0
             )
         ])
         
         # Normalization layer
         self.norm = nn.LayerNorm(dim)
+        
+        # Edge detector for better structure-aware attention
+        self.edge_detector = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 1, kernel_size=3, padding=1),
+            nn.Sigmoid()
+        )
         
         # Process attention into heatmap with enhanced design
         self.conv_process = nn.Sequential(
@@ -50,6 +69,16 @@ class DualAttentionHeatmapGenerator(nn.Module):
             nn.Conv2d(dim//2, dim//4, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(dim//4, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Refinement module for the attention map
+        self.refine = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=3, padding=1),  # 1 from attention + 1 from edge
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 8, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(8, 1, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
 
@@ -62,6 +91,9 @@ class DualAttentionHeatmapGenerator(nn.Module):
         # Extract features
         features = self.init_conv(x)  # B, dim, H, W
 
+        # Detect edges for structure awareness
+        edges = self.edge_detector(x)  # B, 1, H, W
+        
         # Reshape for Swin Transformer
         features_reshaped = features.flatten(2).transpose(1, 2)  # B, H*W, dim
 
@@ -76,6 +108,19 @@ class DualAttentionHeatmapGenerator(nn.Module):
         features_spatial = features_reshaped.view(B, H, W, -1).permute(0, 3, 1, 2)  # B, dim, H, W
 
         # Process into attention heatmap
-        heatmap = self.conv_process(features_spatial)
-
-        return heatmap
+        initial_heatmap = self.conv_process(features_spatial)
+        
+        # Combine with edge information for refined attention
+        combined = torch.cat([initial_heatmap, edges], dim=1)
+        refined_heatmap = self.refine(combined)
+        
+        # Create sharper attention using gamma correction and edge enhancement
+        gamma = 0.7  # < 1 emphasizes mid-tone regions
+        sharpened = torch.pow(refined_heatmap, gamma)
+        
+        # Normalize to ensure proper range
+        min_vals = sharpened.view(B, -1).min(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+        max_vals = sharpened.view(B, -1).max(dim=1, keepdim=True)[0].unsqueeze(-1).unsqueeze(-1)
+        normalized = (sharpened - min_vals) / (max_vals - min_vals + 1e-8)
+        
+        return normalized
