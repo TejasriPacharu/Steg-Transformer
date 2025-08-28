@@ -589,16 +589,20 @@ def train_epoch(steg_system, dataloader, optimizer, device,
     
     return results
 
-def visualize_results(steg_system, dataloader, device, save_dir, epoch, use_high_attention=True):
+def select_visualization_samples(dataloader, device):
     """
-    Visualize the results on a few sample images using the enhanced steganography system
+    Select a random set of samples for visualization during the current epoch.
+    These samples will be used for both high and low attention embedding visualization.
+    A new set of samples will be selected for the next epoch.
+    
+    Args:
+        dataloader: DataLoader containing the dataset
+        device: Device to store tensors on
+        
+    Returns:
+        Tuple of (cover_imgs, secret_imgs) to use for visualization
     """
-    steg_system.eval()
-    
-    # Create directory if it doesn't exist
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # Get a batch of images
+    # Get a batch of images from the dataloader
     cover_imgs, secret_imgs = next(iter(dataloader))
     
     # Determine how many samples to visualize (up to 4, but limited by batch size)
@@ -608,8 +612,29 @@ def visualize_results(steg_system, dataloader, device, save_dir, epoch, use_high
     cover_imgs = cover_imgs[:n_samples].to(device)
     secret_imgs = secret_imgs[:n_samples].to(device)
     
+    return cover_imgs, secret_imgs
+
+def visualize_results(steg_system, dataloader, device, save_dir, epoch):
+    """
+    Visualize the results on a few sample images using the enhanced steganography system.
+    For each epoch, randomly select cover and secret images, and use the same images
+    for both high and low attention visualization.
+    """
+    # Set model to evaluation mode to ensure deterministic behavior
+    steg_system.eval()
+    
+    # Create directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Select random samples for this epoch's visualization
+    cover_imgs, secret_imgs = select_visualization_samples(dataloader, device)
+    
+    # Determine how many samples we have
+    n_samples = cover_imgs.size(0)
+    
     with torch.no_grad():
-        # Get the comparison results
+        # Get the comparison results - this will generate results for both
+        # high and low attention using the same cover and secret images
         results = steg_system.compare_attention_methods(cover_imgs, secret_imgs)
         
         # Extract the relevant tensors for visualization
@@ -623,104 +648,93 @@ def visualize_results(steg_system, dataloader, device, save_dir, epoch, use_high
         embedding_map_low = results["embedding_map_low"]
         metrics = results["metrics"]
     
-    attention_mode = "high" if use_high_attention else "low"
-    
-    # Create a figure with n_samples rows and 8 columns for comprehensive visualization
-    fig, axes = plt.subplots(n_samples, 8, figsize=(24, 5 * n_samples))
-    
-    # Handle case where n_samples is 1 (axes would be 1D)
-    if n_samples == 1:
-        axes = axes.reshape(1, -1)
-    
-    for i in range(n_samples):
-        # Extract the data for this sample
-        cover_np = cover_imgs[i].cpu().numpy().transpose(1, 2, 0)
-        secret_np = secret_imgs[i].cpu().numpy().transpose(1, 2, 0)
+    # Create figures for both high and low attention results
+    for attention_mode in ['high', 'low']:
+        # Create a figure with n_samples rows and 8 columns for comprehensive visualization
+        fig, axes = plt.subplots(n_samples, 8, figsize=(24, 5 * n_samples))
         
-        # Get the high attention results
-        container_high_np = container_high[i].cpu().numpy().transpose(1, 2, 0)
-        extracted_high_np = extracted_high[i].cpu().numpy().transpose(1, 2, 0)
+        # Handle case where n_samples is 1 (axes would be 1D)
+        if n_samples == 1:
+            axes = axes.reshape(1, -1)
         
-        # Get the low attention results
-        container_low_np = container_low[i].cpu().numpy().transpose(1, 2, 0)
-        extracted_low_np = extracted_low[i].cpu().numpy().transpose(1, 2, 0)
-        
-        # Calculate metrics for this sample
-        high_psnr_container = calculate_psnr(cover_np, container_high_np)
-        high_ssim_container = calculate_ssim(cover_np, container_high_np)
-        high_psnr_secret = calculate_psnr(secret_np, extracted_high_np)
-        high_ssim_secret = calculate_ssim(secret_np, extracted_high_np)
-        
-        low_psnr_container = calculate_psnr(cover_np, container_low_np)
-        low_ssim_container = calculate_ssim(cover_np, container_low_np)
-        low_psnr_secret = calculate_psnr(secret_np, extracted_low_np)
-        low_ssim_secret = calculate_ssim(secret_np, extracted_low_np)
-        
-        # Plot the images
-        axes[i, 0].imshow(np.clip(cover_np, 0, 1))
-        axes[i, 0].set_title("Cover Image")
-        axes[i, 0].axis("off")
-        
-        axes[i, 1].imshow(np.clip(secret_np, 0, 1))
-        axes[i, 1].set_title("Secret Image")
-        axes[i, 1].axis("off")
-        
-        # Display attention heatmaps
-        axes[i, 2].imshow(cover_attention[i].cpu().numpy().squeeze(), cmap='hot')
-        axes[i, 2].set_title("Cover Attention")
-        axes[i, 2].axis("off")
-        
-        axes[i, 3].imshow(secret_attention[i].cpu().numpy().squeeze(), cmap='hot')
-        axes[i, 3].set_title("Secret Attention")
-        axes[i, 3].axis("off")
-        
-        # Display embedding maps
-        axes[i, 4].imshow(embedding_map_high[i].cpu().numpy().squeeze(), cmap='viridis')
-        axes[i, 4].set_title("High Attn Embedding")
-        axes[i, 4].axis("off")
-        
-        axes[i, 5].imshow(embedding_map_low[i].cpu().numpy().squeeze(), cmap='viridis')
-        axes[i, 5].set_title("Low Attn Embedding")
-        axes[i, 5].axis("off")
-        
-        # Calculate PSNR and SSIM for each sample
-        psnr_high_container = calculate_psnr(cover_np, container_high_np)
-        ssim_high_container = calculate_ssim(cover_np, container_high_np)
-        psnr_high_secret = calculate_psnr(secret_np, extracted_high_np)
-        ssim_high_secret = calculate_ssim(secret_np, extracted_high_np)
-        
-        psnr_low_container = calculate_psnr(cover_np, container_low_np)
-        ssim_low_container = calculate_ssim(cover_np, container_low_np)
-        psnr_low_secret = calculate_psnr(secret_np, extracted_low_np)
-        ssim_low_secret = calculate_ssim(secret_np, extracted_low_np)
-        
-        # Display high attention results
-        if use_high_attention:
-            container_np = container_high_np
-            extracted_np = extracted_high_np
+        for i in range(n_samples):
+            # Extract the data for this sample
+            cover_np = cover_imgs[i].cpu().numpy().transpose(1, 2, 0)
+            secret_np = secret_imgs[i].cpu().numpy().transpose(1, 2, 0)
             
+            # Get the high attention results
+            container_high_np = container_high[i].cpu().numpy().transpose(1, 2, 0)
+            extracted_high_np = extracted_high[i].cpu().numpy().transpose(1, 2, 0)
+            
+            # Get the low attention results
+            container_low_np = container_low[i].cpu().numpy().transpose(1, 2, 0)
+            extracted_low_np = extracted_low[i].cpu().numpy().transpose(1, 2, 0)
+            
+            # Calculate metrics for this sample
+            high_psnr_container = calculate_psnr(cover_np, container_high_np)
+            high_ssim_container = calculate_ssim(cover_np, container_high_np)
+            high_psnr_secret = calculate_psnr(secret_np, extracted_high_np)
+            high_ssim_secret = calculate_ssim(secret_np, extracted_high_np)
+            
+            low_psnr_container = calculate_psnr(cover_np, container_low_np)
+            low_ssim_container = calculate_ssim(cover_np, container_low_np)
+            low_psnr_secret = calculate_psnr(secret_np, extracted_low_np)
+            low_ssim_secret = calculate_ssim(secret_np, extracted_low_np)
+            
+            # Plot the images
+            axes[i, 0].imshow(np.clip(cover_np, 0, 1))
+            axes[i, 0].set_title("Cover Image")
+            axes[i, 0].axis("off")
+            
+            axes[i, 1].imshow(np.clip(secret_np, 0, 1))
+            axes[i, 1].set_title("Secret Image")
+            axes[i, 1].axis("off")
+            
+            # Display attention heatmaps
+            axes[i, 2].imshow(cover_attention[i].cpu().numpy().squeeze(), cmap='hot')
+            axes[i, 2].set_title("Cover Attention")
+            axes[i, 2].axis("off")
+            
+            axes[i, 3].imshow(secret_attention[i].cpu().numpy().squeeze(), cmap='hot')
+            axes[i, 3].set_title("Secret Attention")
+            axes[i, 3].axis("off")
+            
+            # Display embedding maps
+            axes[i, 4].imshow(embedding_map_high[i].cpu().numpy().squeeze(), cmap='viridis')
+            axes[i, 4].set_title("High Attn Embedding")
+            axes[i, 4].axis("off")
+            
+            axes[i, 5].imshow(embedding_map_low[i].cpu().numpy().squeeze(), cmap='viridis')
+            axes[i, 5].set_title("Low Attn Embedding")
+            axes[i, 5].axis("off")
+            
+            # Display container and extracted image based on attention mode
+            if attention_mode == 'high':
+                container_np = container_high_np
+                extracted_np = extracted_high_np
+                psnr_container = high_psnr_container
+                ssim_container = high_ssim_container
+                psnr_secret = high_psnr_secret
+                ssim_secret = high_ssim_secret
+            else:
+                container_np = container_low_np
+                extracted_np = extracted_low_np
+                psnr_container = low_psnr_container
+                ssim_container = low_ssim_container
+                psnr_secret = low_psnr_secret
+                ssim_secret = low_ssim_secret
+                
             axes[i, 6].imshow(np.clip(container_np, 0, 1))
-            axes[i, 6].set_title(f'Container (High)\nPSNR: {psnr_high_container:.2f}dB\nSSIM: {ssim_high_container:.4f}')
+            axes[i, 6].set_title(f'Container ({attention_mode.capitalize()})\nPSNR: {psnr_container:.2f}dB\nSSIM: {ssim_container:.4f}')
             axes[i, 6].axis("off")
             
             axes[i, 7].imshow(np.clip(extracted_np, 0, 1))
-            axes[i, 7].set_title(f'Extracted (High)\nPSNR: {psnr_high_secret:.2f}dB\nSSIM: {ssim_high_secret:.4f}')
+            axes[i, 7].set_title(f'Extracted ({attention_mode.capitalize()})\nPSNR: {psnr_secret:.2f}dB\nSSIM: {ssim_secret:.4f}')
             axes[i, 7].axis("off")
-        else:
-            container_np = container_low_np
-            extracted_np = extracted_low_np
-            
-            axes[i, 6].imshow(np.clip(container_np, 0, 1))
-            axes[i, 6].set_title(f'Container (Low)\nPSNR: {psnr_low_container:.2f}dB\nSSIM: {ssim_low_container:.4f}')
-            axes[i, 6].axis("off")
-            
-            axes[i, 7].imshow(np.clip(extracted_np, 0, 1))
-            axes[i, 7].set_title(f'Extracted (Low)\nPSNR: {psnr_low_secret:.2f}dB\nSSIM: {ssim_low_secret:.4f}')
-            axes[i, 7].axis("off")
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f'results_epoch_{epoch}_{attention_mode}_attention.png'))
-    plt.close()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f'results_epoch_{epoch}_{attention_mode}_attention.png'))
+        plt.close()
     
 
 def save_checkpoint(state, filename):
@@ -885,7 +899,7 @@ def main():
         val_loss, val_hiding_loss, val_extraction_loss, val_psnr_container, val_psnr_secret, val_ssim_container, val_ssim_secret = val_metrics
         
         # Visualize results with specified attention mode
-        visualize_results(steg_system, val_loader, device, args.vis_dir, epoch, use_high_attention=args.use_high_attention)
+        visualize_results(steg_system, val_loader, device, args.vis_dir, epoch)
         
         # If train_both flag is set, also validate and visualize with the opposite attention mode
         if args.train_both:
