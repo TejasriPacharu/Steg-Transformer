@@ -913,7 +913,7 @@ def main():
             opposite_val_loss, opposite_val_hiding_loss, opposite_val_extraction_loss, opposite_val_psnr_container, opposite_val_psnr_secret, opposite_val_ssim_container, opposite_val_ssim_secret = opposite_val_metrics
             
             # Visualize results with opposite attention mode
-            visualize_results(steg_system, val_loader, device, args.vis_dir, epoch, use_high_attention=not args.use_high_attention)
+            visualize_results(steg_system, val_loader, device, args.vis_dir, epoch)
         
         # Step the scheduler
         scheduler.step()
@@ -1011,8 +1011,7 @@ def main():
     
     # Create a test batch for final evaluation
     final_val_loader = DataLoader(val_dataset, batch_size=min(16, len(val_dataset)), shuffle=True, num_workers=4, pin_memory=True)
-    test_cover, test_secret = next(iter(final_val_loader))
-    test_cover, test_secret = test_cover.to(device), test_secret.to(device)
+    test_cover, test_secret = select_visualization_samples(final_val_loader, device)
     
     # Run final comprehensive evaluation with visualizations
     with torch.no_grad():
