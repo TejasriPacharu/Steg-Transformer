@@ -576,16 +576,18 @@ def train_epoch(steg_system, dataloader, optimizer, device,
     avg_loss = total_loss / len(dataloader)
     avg_hiding_loss = total_hiding_loss / len(dataloader)
     avg_extraction_loss = total_extraction_loss / len(dataloader)
-    
-    results = (avg_loss, avg_hiding_loss, avg_extraction_loss)
-    
+    avg_attention_loss = total_attention_loss / len(dataloader)
+
+    results = (avg_loss, avg_hiding_loss, avg_extraction_loss, avg_attention_loss)
+
     # Calculate average losses for opposite mode if applicable
     if train_both:
         opposite_avg_loss = opposite_total_loss / len(dataloader)
         opposite_avg_hiding_loss = opposite_total_hiding_loss / len(dataloader)
         opposite_avg_extraction_loss = opposite_total_extraction_loss / len(dataloader)
+        opposite_avg_attention_loss = opposite_total_attention_loss / len(dataloader)
         
-        opposite_results = (opposite_avg_loss, opposite_avg_hiding_loss, opposite_avg_extraction_loss)
+        opposite_results = (opposite_avg_loss, opposite_avg_hiding_loss, opposite_avg_extraction_loss, opposite_avg_attention_loss)
         return results, opposite_results
     
     return results
