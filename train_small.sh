@@ -14,5 +14,5 @@ python training-script.py \
     --embed_dim=24 \
     --num_heads 2 2 2 2 \
     --depths 2 2 2 2 \
-    --pretrain \
+    --pretrain_extractor \
     --pretrain_epochs=1
