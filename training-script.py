@@ -932,8 +932,82 @@ def main():
         })
         
         # Visualize results
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            metrics = visualize_results(steg_system, val_loader, device, save_dir, epoch + 1)
+        metrics = visualize_results(steg_system, val_loader, device, save_dir, epoch + 1)
+        
+        # Calculate PSNR and SSIM for both high and low attention embedding
+        with torch.no_grad():
+            # Get sample images for metrics calculation
+            cover_imgs, secret_imgs = select_visualization_samples(val_loader, device)
+            
+            # Get both high and low attention results
+            results = steg_system.compare_attention_methods(cover_imgs, secret_imgs)
+            
+            # Extract high attention results
+            container_high = results["container_high"]
+            extracted_high = results["extracted_high"]
+            
+            # Extract low attention results
+            container_low = results["container_low"]
+            extracted_low = results["extracted_low"]
+            
+            # Calculate high attention metrics
+            high_psnr_container = 0.0
+            high_ssim_container = 0.0
+            high_psnr_secret = 0.0
+            high_ssim_secret = 0.0
+            
+            # Calculate low attention metrics
+            low_psnr_container = 0.0
+            low_ssim_container = 0.0
+            low_psnr_secret = 0.0
+            low_ssim_secret = 0.0
+            
+            # Calculate metrics for each image in the batch
+            for i in range(cover_imgs.size(0)):
+                # Get numpy arrays for metric calculation
+                cover_np = cover_imgs[i].cpu().numpy().transpose(1, 2, 0)
+                secret_np = secret_imgs[i].cpu().numpy().transpose(1, 2, 0)
+                
+                # High attention results
+                container_high_np = container_high[i].cpu().numpy().transpose(1, 2, 0)
+                extracted_high_np = extracted_high[i].cpu().numpy().transpose(1, 2, 0)
+                
+                # Low attention results
+                container_low_np = container_low[i].cpu().numpy().transpose(1, 2, 0)
+                extracted_low_np = extracted_low[i].cpu().numpy().transpose(1, 2, 0)
+                
+                # Calculate high attention metrics
+                high_psnr_container += calculate_psnr(cover_np, container_high_np)
+                high_ssim_container += calculate_ssim(cover_np, container_high_np)
+                high_psnr_secret += calculate_psnr(secret_np, extracted_high_np)
+                high_ssim_secret += calculate_ssim(secret_np, extracted_high_np)
+                
+                # Calculate low attention metrics
+                low_psnr_container += calculate_psnr(cover_np, container_low_np)
+                low_ssim_container += calculate_ssim(cover_np, container_low_np)
+                low_psnr_secret += calculate_psnr(secret_np, extracted_low_np)
+                low_ssim_secret += calculate_ssim(secret_np, extracted_low_np)
+            
+            # Calculate averages
+            batch_size = cover_imgs.size(0)
+            high_psnr_container /= batch_size
+            high_ssim_container /= batch_size
+            high_psnr_secret /= batch_size
+            high_ssim_secret /= batch_size
+            
+            low_psnr_container /= batch_size
+            low_ssim_container /= batch_size
+            low_psnr_secret /= batch_size
+            low_ssim_secret /= batch_size
+            
+            # Print metrics for both embedding methods
+            print(f"\nHigh Attention Embedding Metrics:")
+            print(f"  Container: PSNR={high_psnr_container:.2f}dB, SSIM={high_ssim_container:.4f}")
+            print(f"  Secret: PSNR={high_psnr_secret:.2f}dB, SSIM={high_ssim_secret:.4f}")
+            
+            print(f"Low Attention Embedding Metrics:")
+            print(f"  Container: PSNR={low_psnr_container:.2f}dB, SSIM={low_ssim_container:.4f}")
+            print(f"  Secret: PSNR={low_psnr_secret:.2f}dB, SSIM={low_ssim_secret:.4f}\n")
         
         # Print statistics
         print(f"Epoch {epoch+1}/{args.epochs} - "
