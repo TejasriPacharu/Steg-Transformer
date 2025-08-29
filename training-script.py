@@ -68,36 +68,39 @@ class TinyImageNetDataset(Dataset):
     def __len__(self):
         return len(self.img_paths)
 
+
     def __getitem__(self, idx):
-        img_path = self.img_paths[idx]
-        
         try:
-            # Load the cover image
-            cover_image = Image.open(img_path).convert('RGB')
-            
-            # For the secret image, select a different random image
+            # Pick random index for cover
+            cover_idx = random.randint(0, len(self.img_paths) - 1)
+            cover_image = Image.open(self.img_paths[cover_idx]).convert('RGB')
+
+            # Pick random index for secret (different from cover)
             secret_idx = random.randint(0, len(self.img_paths) - 1)
-            # Make sure it's not the same as the cover image
-            while secret_idx == idx:
+            while secret_idx == cover_idx:
                 secret_idx = random.randint(0, len(self.img_paths) - 1)
-                
-            secret_img_path = self.img_paths[secret_idx]
-            secret_image = Image.open(secret_img_path).convert('RGB')
-            
+
+            secret_image = Image.open(self.img_paths[secret_idx]).convert('RGB')
+
             if self.transform:
                 cover_image = self.transform(cover_image)
                 secret_image = self.transform(secret_image)
-            
-            # Return different images for cover and secret
+
             return cover_image, secret_image
-            
+
         except Exception as e:
-            print(f"Error loading {img_path}: {e}")
-            # Return default black images in case of error
+            print(f"Error loading image: {e}")
             if self.transform:
-                return self.transform(Image.new('RGB', (64, 64), (0, 0, 0))), self.transform(Image.new('RGB', (64, 64), (0, 0, 0)))
+                return (
+                    self.transform(Image.new('RGB', (64, 64), (0, 0, 0))),
+                    self.transform(Image.new('RGB', (64, 64), (0, 0, 0)))
+                )
             else:
-                return Image.new('RGB', (64, 64), (0, 0, 0)), Image.new('RGB', (64, 64), (0, 0, 0))
+                return (
+                    Image.new('RGB', (64, 64), (0, 0, 0)),
+                    Image.new('RGB', (64, 64), (0, 0, 0))
+                )
+
 
 class CombinedLoss(nn.Module):
     """
