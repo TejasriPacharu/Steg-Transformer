@@ -884,11 +884,11 @@ def main():
         if args.train_both:
             # If training both modes, we get two result tuples
             primary_results, opposite_results = train_result
-            train_loss, train_hiding_loss, train_extraction_loss = primary_results
+            train_loss, train_hiding_loss, train_extraction_loss, train_attention_loss = primary_results
             # You can also use opposite_results if needed
         else:
             # If training single mode, we get one result tuple
-            train_loss, train_hiding_loss, train_extraction_loss = train_result
+            train_loss, train_hiding_loss, train_extraction_loss, train_attention_loss = train_result
         
         # Validate with specified attention mode
         val_metrics = validate(
