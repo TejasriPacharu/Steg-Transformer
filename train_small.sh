@@ -1,15 +1,19 @@
-#!/bin/bash
-echo "Starting lightweight debug training run with per-epoch visualizations and metrics..."
+# Run training with optimized parameters for better color reproduction
+echo "TRAINING BEGINS."
 python training-script.py \
-    --data_dir=./dataset \
-    --batch_size=4 \
-    --lr=0.001 \
-    --epochs=10 \
-    --img_size=144 \
-    --alpha=0.5 \
-    --beta=0.5 \
-    --save_dir=./debug_visualizations \
-    --window_size=4 \
-    --embed_dim=24 \
-    --pretrain \
-    --pretrain_epochs=1
+    --dataset_path=./dataset \
+    --batch_size 8 \
+    --epochs 20 \
+    --lr 0.0001 \
+    --alpha 0.6 \
+    --beta 0.4 \
+    --use_high_attention \
+    --pretrain_epochs 3 \
+    --checkpoint_dir $CHECKPOINT_DIR \
+    --save_interval 2 \
+    --resume 0 \
+    --img_size 144 \
+    --embedding_dim 128 \
+    --window_size 8 \
+    --attention_diversity_weight 0.01 \
+    --color_preservation_weight 0.2

@@ -95,17 +95,34 @@ class EnhancedSteganographySystem(nn.Module):
         if use_high_attention:
             # Embed more in high attention areas but less in high gradient areas of cover
             # to preserve cover details, while focusing on high detail areas in secret
-            embedding_strength = (cover_attention - 0.3 * cover_gradient) * (secret_attention + 0.4 * secret_gradient + 0.25)
+            # More balanced approach to preserve cover image structure
+            embedding_strength = (cover_attention - 0.2 * cover_gradient) * (secret_attention + 0.3 * secret_gradient + 0.2)
         else:
             # Embed in low attention areas but still consider detail preservation
-            # Avoid very low attention areas in secret (add 0.25 baseline)
-            embedding_strength = (1 - cover_attention + 0.2 * cover_gradient) * (secret_attention + 0.4 * secret_gradient + 0.25)
+            # Avoid very low attention areas in secret (add 0.2 baseline)
+            embedding_strength = (1 - cover_attention + 0.15 * cover_gradient) * (secret_attention + 0.3 * secret_gradient + 0.2)
             
         # Apply spatial consistency to avoid abrupt changes in embedding strength
-        kernel_size = 3
+        # Use Gaussian blur for smoother transitions
+        kernel_size = 5
+        sigma = 1.5
         padding = kernel_size // 2
-        smoothed_strength = F.avg_pool2d(embedding_strength, kernel_size, stride=1, padding=padding)
-        embedding_strength = 0.7 * embedding_strength + 0.3 * smoothed_strength
+        
+        # Create a Gaussian kernel
+        x = torch.arange(-padding, padding + 1, dtype=torch.float32, device=embedding_strength.device)
+        y = torch.arange(-padding, padding + 1, dtype=torch.float32, device=embedding_strength.device)
+        x, y = torch.meshgrid(x, y)
+        kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
+        kernel = kernel / kernel.sum()
+        kernel = kernel.view(1, 1, kernel_size, kernel_size).repeat(1, 1, 1, 1)
+        
+        # Apply Gaussian smoothing
+        smoothed_strength = F.conv2d(
+            F.pad(embedding_strength, (padding, padding, padding, padding), mode='reflect'),
+            kernel, padding=0
+        )
+        
+        embedding_strength = 0.8 * embedding_strength + 0.2 * smoothed_strength
         
         # Apply adaptive normalization for better balance
         embedding_strength = self.normalize_embedding_strength(embedding_strength)
@@ -120,9 +137,9 @@ class EnhancedSteganographySystem(nn.Module):
         """
         B, _, H, W = strength_map.shape
         
-        # Increase minimum strength to ensure adequate information preservation
-        min_strength = 0.5  # Base minimum strength
-        max_strength = 0.95  # Maximum strength cap
+        # Modified embedding strength range for better balance
+        min_strength = 0.6  # Increased minimum strength (was 0.5)
+        max_strength = 0.9  # Decreased maximum strength (was 0.95)
         
         # Apply histogram equalization-like processing to each map individually
         normalized_maps = []
@@ -139,14 +156,15 @@ class EnhancedSteganographySystem(nn.Module):
             stretched = torch.clamp(stretched, 0, 1)
             
             # Apply smooth sigmoid-like function to enhance mid-tones while preserving details
-            # Using a custom function that maintains more gradations than pure sigmoid
-            enhanced = (torch.sin((stretched - 0.5) * np.pi) + 1) / 2
+            # Use a softer curve for better preservation of gradations
+            enhanced = stretched * (1 - stretched) * 4  # Parabolic curve peaking at 0.5
+            enhanced = 0.3 + 0.7 * enhanced  # Shift range to [0.3, 1.0]
             
             # Scale to desired strength range
             scaled = min_strength + (max_strength - min_strength) * enhanced
             
             # Add small constant to ensure minimum embedding everywhere
-            scaled = scaled + 0.05
+            scaled = scaled + 0.02
             scaled = torch.clamp(scaled, 0, max_strength)
             
             normalized_maps.append(scaled.unsqueeze(0).unsqueeze(0))
@@ -193,25 +211,35 @@ class EnhancedSteganographySystem(nn.Module):
             map_b = attention_map[b]
             std_b = stds[b]
             
-            if std_b < 0.1:  # If map is too uniform
-                # Apply histogram equalization-like enhancement
-                sorted_vals, _ = torch.sort(map_b.flatten())
-                n = sorted_vals.shape[0]
-                ranks = torch.linspace(0, 1, n, device=map_b.device)
+            if std_b < 0.15:  # Increased threshold for more aggressive enhancement
+                # Apply contrast enhancement using CLAHE-like approach
+                # First bin the values to simulate histogram
+                n_bins = 256
+                min_val = map_b.min()
+                max_val = map_b.max()
+                bin_width = (max_val - min_val) / n_bins
                 
-                # Map original values to rank-based values (0-1 range)
-                # This is similar to histogram equalization
+                # Create histogram
+                hist = torch.histc(map_b, bins=n_bins, min=min_val, max=max_val)
+                
+                # Calculate cumulative distribution function (CDF)
+                cdf = torch.cumsum(hist, 0)
+                cdf = cdf / cdf[-1]  # Normalize CDF to [0, 1]
+                
+                # Apply histogram equalization
                 map_b_flat = map_b.flatten()
-                enhanced_flat = torch.zeros_like(map_b_flat)
+                bin_indices = ((map_b_flat - min_val) / bin_width).floor().clamp(0, n_bins-1).long()
+                enhanced_flat = cdf[bin_indices]
                 
-                for i, val in enumerate(sorted_vals):
-                    mask = (map_b_flat == val)
-                    enhanced_flat[mask] = ranks[i]
+                # Apply sigmoid-based contrast enhancement for smoother result
+                enhanced_flat = torch.sigmoid((enhanced_flat - 0.5) * 5)
                 
                 # Reshape back and add to result
                 enhanced_maps.append(enhanced_flat.view(C, H, W))
             else:
-                enhanced_maps.append(map_b)
+                # For sufficiently diverse maps, apply mild contrast enhancement
+                enhanced = torch.sigmoid((map_b - means[b]) * 3 + 0.5)
+                enhanced_maps.append(enhanced)
         
         return torch.stack(enhanced_maps)
     

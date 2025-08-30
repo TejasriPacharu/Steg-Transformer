@@ -68,12 +68,12 @@ class EnhancedHidingNetwork(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=3, padding=1)
-            # No sigmoid to avoid color saturation issues
+            nn.Conv2d(32, 3, kernel_size=3, padding=1),
+            nn.Tanh()  # Use tanh for residual to constrain values to [-1, 1] range
         )
 
         # Dynamic alpha parameter for better cover-container balance
-        self.alpha_base = nn.Parameter(torch.tensor(0.6))  # Starting with more cover influence
+        self.alpha_base = nn.Parameter(torch.tensor(0.7))  # Increased for better cover preservation
         
         # Alpha modulation based on attention
         self.alpha_modulator = nn.Sequential(
@@ -119,23 +119,25 @@ class EnhancedHidingNetwork(nn.Module):
         # Combine with cover features, secret features and color features
         x = torch.cat([x, cover_features, secret_features, color_features], dim=1)
         
-        # Final processing - output without sigmoid for better color dynamics
+        # Final processing - output with tanh for better color dynamics
         residual = self.final_conv(x)
         
-        # Dynamic blending with position-specific alpha
-        dynamic_alpha_expanded = dynamic_alpha.expand(-1, C, -1, -1)
-        container = dynamic_alpha_expanded * cover_img + (1 - dynamic_alpha_expanded) * torch.tanh(residual)
+        # Dynamic blending with position-specific alpha - increased alpha range for better cover preservation
+        # Alpha range: 0.7 to 0.9 (higher values preserve more of the cover)
+        dynamic_alpha_expanded = 0.7 + 0.2 * dynamic_alpha.expand(-1, C, -1, -1)
+        container = dynamic_alpha_expanded * cover_img + (1 - dynamic_alpha_expanded) * ((residual + 1) / 2)
         
-        # Direct secret contribution but with careful scaling to preserve visibility
-        # but without causing obvious artifacts
-        min_embed_strength = 0.1  # Minimum embedding strength
-        max_embed_strength = 0.2  # Maximum embedding strength
+        # Direct secret contribution with more careful scaling
+        # Reduced min/max embedding strength to make changes more subtle
+        min_embed_strength = 0.03  # Reduced from 0.1
+        max_embed_strength = 0.08  # Reduced from 0.2
         
         # Scale the embedding map to determine secret contribution strength
         contribution_strength = min_embed_strength + (max_embed_strength - min_embed_strength) * embedding_map_expanded
         
         # Apply the direct secret contribution with the secret features to guide embedding
-        secret_signal = torch.tanh(secret_img) * 0.5 + 0.5  # Normalize to [0,1] with tanh
+        # Use scaled sigmoid for a smoother embedding that preserves the secret
+        secret_signal = torch.sigmoid(5 * (secret_img - 0.5))  # Sharper sigmoid for better contrast
         secret_contribution = contribution_strength * secret_signal
         
         # Add contribution and clamp to valid image range
@@ -201,14 +203,14 @@ class EnhancedExtractionNetwork(nn.Module):
         
         # Final processing with concatenated skip features
         self.final_conv = nn.Sequential(
-            nn.Conv2d(64 + 16 * len(depths), 128, kernel_size=3, padding=1),  # Increased width
+            nn.Conv2d(64 + 16 * len(depths), 128, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # Increased width
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=3, padding=1)
-            # No final sigmoid to allow more color range
+            nn.Conv2d(32, 3, kernel_size=3, padding=1),
+            nn.Sigmoid()  # Added sigmoid for proper 0-1 range
         )
         
         # Add residual refinement layer for final detail enhancement
@@ -225,6 +227,15 @@ class EnhancedExtractionNetwork(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 3, kernel_size=3, padding=1),
             nn.Tanh()
+        )
+        
+        # Add color balance correction module
+        self.color_balance = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # Global pooling for color statistics
+            nn.Conv2d(3, 8, kernel_size=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(8, 3, kernel_size=1),
+            nn.Sigmoid()  # Output color multipliers
         )
     
     def forward(self, container_img):
@@ -249,42 +260,43 @@ class EnhancedExtractionNetwork(nn.Module):
         for skip in skip_outputs:
             x = torch.cat([x, skip], dim=1)
             
-        # First-pass extraction (without sigmoid)
-        initial_secret = torch.tanh(self.final_conv(x))  # Tanh to normalize to [-1,1]
-        
-        # Normalize to [0,1] for further processing
-        initial_secret = (initial_secret + 1) / 2
+        # First-pass extraction (with sigmoid)
+        initial_secret = self.final_conv(x)
         
         # Refinement using both the container and initial extraction
         refine_input = torch.cat([initial_secret, container_img], dim=1)
         refinement = self.refine(refine_input)
         
         # Apply refinement with increased strength for better detail recovery
-        secret_with_refinement = initial_secret + 0.3 * refinement
+        secret_with_refinement = initial_secret + 0.2 * refinement  # Reduced from 0.3
         
         # Apply color correction
         color_adjustment = self.color_corrector(secret_with_refinement)
-        color_corrected = secret_with_refinement + 0.2 * color_adjustment
+        color_corrected = secret_with_refinement + 0.15 * color_adjustment  # Reduced from 0.2
         
         # Apply contrast enhancement
         contrast_adjustment = self.contrast_enhancer(color_corrected)
-        enhanced_secret = color_corrected + 0.15 * contrast_adjustment
+        enhanced_secret = color_corrected + 0.1 * contrast_adjustment  # Reduced from 0.15
+        
+        # Apply color balance correction
+        color_multipliers = self.color_balance(enhanced_secret)
+        balanced_secret = enhanced_secret * (0.8 + 0.4 * color_multipliers)  # Range: 0.8 to 1.2
         
         # Normalize histogram to improve contrast
-        b, c, h, w = enhanced_secret.shape
-        normalized_secret = enhanced_secret.clone()
+        b, c, h, w = balanced_secret.shape
+        normalized_secret = balanced_secret.clone()
         
         for i in range(b):
             for j in range(c):
                 # Get channel
-                channel = enhanced_secret[i, j]
+                channel = balanced_secret[i, j]
                 
                 # Get percentiles for robust normalization
-                low_val = torch.quantile(channel.flatten(), 0.02)
-                high_val = torch.quantile(channel.flatten(), 0.98)
+                low_val = torch.quantile(channel.flatten(), 0.01)  # Reduced from 0.02
+                high_val = torch.quantile(channel.flatten(), 0.99)  # Increased from 0.98
                 
-                # Apply normalization
-                normalized = (channel - low_val) / (high_val - low_val + 1e-6)
+                # Apply normalization with reduced stretching
+                normalized = 0.05 + 0.9 * (channel - low_val) / (high_val - low_val + 1e-6)  # Range: 0.05 to 0.95
                 normalized_secret[i, j] = torch.clamp(normalized, 0, 1)
         
         # Ensure final output is properly bounded

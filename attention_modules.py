@@ -60,8 +60,8 @@ class DualAttentionHeatmapGenerator(nn.Module):
             nn.Conv2d(3, 16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 1, kernel_size=3, padding=1),
-            # Replace sigmoid with tanh for better gradient flow
-            nn.Tanh()
+            # Replace tanh with sigmoid for proper attention mapping
+            nn.Sigmoid()
         )
         
         # Add gradient detector for texture details
@@ -69,7 +69,7 @@ class DualAttentionHeatmapGenerator(nn.Module):
             nn.Conv2d(3, 16, kernel_size=5, padding=2),  # Larger kernel to capture more context
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 1, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2)
+            nn.Sigmoid()  # Change to sigmoid for proper attention mapping
         )
         
         # Process attention into heatmap with enhanced design
@@ -79,8 +79,8 @@ class DualAttentionHeatmapGenerator(nn.Module):
             nn.Conv2d(dim//2, dim//4, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(dim//4, 1, kernel_size=1),
-            # Remove sigmoid here to avoid binarizing features too early
-            nn.LeakyReLU(0.2)
+            # Add sigmoid here to properly normalize feature maps
+            nn.Sigmoid()
         )
         
         # Refinement module for the attention map
@@ -90,8 +90,8 @@ class DualAttentionHeatmapGenerator(nn.Module):
             nn.Conv2d(16, 8, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(8, 1, kernel_size=3, padding=1),
-            # Use softer activation for more nuanced attention maps
-            nn.Tanh()  # Output range -1 to 1
+            # Use sigmoid for proper attention map normalization (0 to 1 range)
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -103,7 +103,7 @@ class DualAttentionHeatmapGenerator(nn.Module):
         # Extract features
         features = self.init_conv(x)  # B, dim, H, W
 
-        # Detect edges for structure awareness - normalized to [-1, 1]
+        # Detect edges for structure awareness - normalized to [0, 1]
         edges = self.edge_detector(x)  # B, 1, H, W
         
         # Detect gradients for texture detail
@@ -122,36 +122,29 @@ class DualAttentionHeatmapGenerator(nn.Module):
         # Reshape back to spatial form
         features_spatial = features_reshaped.view(B, H, W, -1).permute(0, 3, 1, 2)  # B, dim, H, W
 
-        # Process into initial attention heatmap (without early sigmoid)
+        # Process into initial attention heatmap (with sigmoid)
         initial_heatmap = self.conv_process(features_spatial)
-        
-        # Scale initial heatmap to positive range for refinement
-        initial_heatmap = F.softplus(initial_heatmap)
         
         # Combine with edge and gradient information for refined attention
         combined = torch.cat([initial_heatmap, edges, gradients], dim=1)
         refined_heatmap = self.refine(combined)
         
-        # Convert from [-1, 1] to [0, 1] for final attention map
-        refined_heatmap = (refined_heatmap + 1) / 2
-        
-        # Apply histogram equalization-like stretching for better detail distribution
-        # This ensures we use the full dynamic range without binarizing
+        # Apply adaptive histogram equalization for better distribution
         batch_maps = []
         for b in range(B):
             single_map = refined_heatmap[b, 0]  # Extract single attention map
             
-            # Calculate percentiles instead of min/max to avoid outlier influence
+            # Calculate percentiles for robust normalization (5-95% range)
             low_percentile = torch.quantile(single_map.flatten(), 0.05)
             high_percentile = torch.quantile(single_map.flatten(), 0.95)
             
             # Stretch the map based on percentiles
             stretched_map = (single_map - low_percentile) / (high_percentile - low_percentile + 1e-8)
-            stretched_map = torch.clamp(stretched_map, 0, 1)
+            stretched_map = torch.clamp(stretched_map, 0.05, 0.95)  # Avoid extreme values
             
-            # Apply adaptive gamma correction for better mid-tones
+            # Apply gentle gamma correction for better detail distribution
             mid_level = torch.mean(stretched_map)
-            gamma = 0.8 if mid_level < 0.5 else 1.2  # Adapt gamma based on brightness
+            gamma = 0.9 if mid_level < 0.5 else 1.1  # Subtle gamma correction
             
             corrected_map = torch.pow(stretched_map, gamma)
             batch_maps.append(corrected_map.unsqueeze(0).unsqueeze(0))
@@ -159,10 +152,10 @@ class DualAttentionHeatmapGenerator(nn.Module):
         # Combine batch results
         normalized_maps = torch.cat(batch_maps, dim=0)
         
-        # Apply local contrast enhancement
+        # Apply local contrast enhancement with smaller effect
         kernel_size = 5
         local_mean = F.avg_pool2d(normalized_maps, kernel_size, stride=1, padding=kernel_size//2)
-        enhanced_maps = normalized_maps + 0.5 * (normalized_maps - local_mean)
-        enhanced_maps = torch.clamp(enhanced_maps, 0.05, 0.95)  # Prevent complete black/white regions
+        enhanced_maps = normalized_maps + 0.3 * (normalized_maps - local_mean)
+        enhanced_maps = torch.clamp(enhanced_maps, 0.1, 0.9)  # Prevent extreme values
         
         return enhanced_maps
