@@ -128,9 +128,9 @@ class EnhancedHidingNetwork(nn.Module):
         container = dynamic_alpha_expanded * cover_img + (1 - dynamic_alpha_expanded) * ((residual + 1) / 2)
         
         # Direct secret contribution with more careful scaling
-        # Reduced min/max embedding strength to make changes more subtle
-        min_embed_strength = 0.03  # Reduced from 0.1
-        max_embed_strength = 0.08  # Reduced from 0.2
+        # Updated embedding strength to align with EnhancedSteganographySystem values
+        min_embed_strength = 0.05  # Increased for better secret preservation
+        max_embed_strength = 0.15  # Increased for better secret preservation
         
         # Scale the embedding map to determine secret contribution strength
         contribution_strength = min_embed_strength + (max_embed_strength - min_embed_strength) * embedding_map_expanded

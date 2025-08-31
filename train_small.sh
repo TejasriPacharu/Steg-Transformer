@@ -9,7 +9,7 @@ python training-script.py \
     --beta 0.4 \
     --use_high_attention \
     --pretrain_epochs 3 \
-    --checkpoint_dir $CHECKPOINT_DIR \
+    --checkpoint_dir ./checkpoints \
     --save_interval 2 \
     --resume 0 \
     --img_size 144 \

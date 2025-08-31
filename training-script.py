@@ -617,8 +617,8 @@ def select_visualization_samples(dataloader, device):
 def visualize_results(steg_system, dataloader, device, save_dir, epoch):
     """
     Visualize the results on a few sample images using the enhanced steganography system.
-    For each epoch, randomly select cover and secret images, and use the same images
-    for both high and low attention visualization.
+    Creates a single visualization showing both high and low attention embedding results
+    side by side for each cover-secret pair.
     """
     # Set model to evaluation mode to ensure deterministic behavior
     steg_system.eval()
@@ -648,94 +648,87 @@ def visualize_results(steg_system, dataloader, device, save_dir, epoch):
         embedding_map_low = results["embedding_map_low"]
         metrics = results["metrics"]
     
-    # Create figures for both high and low attention results
-    for attention_mode in ['high', 'low']:
-        # Create a figure with n_samples rows and 8 columns for comprehensive visualization
-        fig, axes = plt.subplots(n_samples, 8, figsize=(24, 5 * n_samples))
-        
-        # Handle case where n_samples is 1 (axes would be 1D)
-        if n_samples == 1:
-            axes = axes.reshape(1, -1)
-            
-        for i in range(n_samples):
-            # Extract the data for this sample
-            cover_np = cover_imgs[i].cpu().numpy().transpose(1, 2, 0)
-            secret_np = secret_imgs[i].cpu().numpy().transpose(1, 2, 0)
-            
-            # Get the high attention results
-            container_high_np = container_high[i].cpu().numpy().transpose(1, 2, 0)
-            extracted_high_np = extracted_high[i].cpu().numpy().transpose(1, 2, 0)
-            
-            # Get the low attention results
-            container_low_np = container_low[i].cpu().numpy().transpose(1, 2, 0)
-            extracted_low_np = extracted_low[i].cpu().numpy().transpose(1, 2, 0)
-            
-            # Calculate metrics for this sample
-            high_psnr_container = calculate_psnr(cover_np, container_high_np)
-            high_ssim_container = calculate_ssim(cover_np, container_high_np)
-            high_psnr_secret = calculate_psnr(secret_np, extracted_high_np)
-            high_ssim_secret = calculate_ssim(secret_np, extracted_high_np)
-            
-            low_psnr_container = calculate_psnr(cover_np, container_low_np)
-            low_ssim_container = calculate_ssim(cover_np, container_low_np)
-            low_psnr_secret = calculate_psnr(secret_np, extracted_low_np)
-            low_ssim_secret = calculate_ssim(secret_np, extracted_low_np)
-            
-            # Plot the images
-            axes[i, 0].imshow(np.clip(cover_np, 0, 1))
-            axes[i, 0].set_title("Cover Image")
-            axes[i, 0].axis("off")
-            
-            axes[i, 1].imshow(np.clip(secret_np, 0, 1))
-            axes[i, 1].set_title("Secret Image")
-            axes[i, 1].axis("off")
-            
-            # Display attention heatmaps
-            axes[i, 2].imshow(cover_attention[i].cpu().numpy().squeeze(), cmap='hot')
-            axes[i, 2].set_title("Cover Attention")
-            axes[i, 2].axis("off")
-            
-            axes[i, 3].imshow(secret_attention[i].cpu().numpy().squeeze(), cmap='hot')
-            axes[i, 3].set_title("Secret Attention")
-            axes[i, 3].axis("off")
-            
-            # Display embedding maps
-            axes[i, 4].imshow(embedding_map_high[i].cpu().numpy().squeeze(), cmap='viridis')
-            axes[i, 4].set_title("High Attn Embedding")
-            axes[i, 4].axis("off")
-            
-            axes[i, 5].imshow(embedding_map_low[i].cpu().numpy().squeeze(), cmap='viridis')
-            axes[i, 5].set_title("Low Attn Embedding")
-            axes[i, 5].axis("off")
-            
-            # Display container and extracted image based on attention mode
-            if attention_mode == 'high':
-                container_np = container_high_np
-                extracted_np = extracted_high_np
-                psnr_container = high_psnr_container
-                ssim_container = high_ssim_container
-                psnr_secret = high_psnr_secret
-                ssim_secret = high_ssim_secret
-            else:
-                container_np = container_low_np
-                extracted_np = extracted_low_np
-                psnr_container = low_psnr_container
-                ssim_container = low_ssim_container
-                psnr_secret = low_psnr_secret
-                ssim_secret = low_ssim_secret
-                
-            axes[i, 6].imshow(np.clip(container_np, 0, 1))
-            axes[i, 6].set_title(f'Container ({attention_mode.capitalize()})\nPSNR: {psnr_container:.2f}dB\nSSIM: {ssim_container:.4f}')
-            axes[i, 6].axis("off")
-            
-            axes[i, 7].imshow(np.clip(extracted_np, 0, 1))
-            axes[i, 7].set_title(f'Extracted ({attention_mode.capitalize()})\nPSNR: {psnr_secret:.2f}dB\nSSIM: {ssim_secret:.4f}')
-            axes[i, 7].axis("off")
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f'results_epoch_{epoch}_{attention_mode}_attention.png'))
-        plt.close()
+    # Create a single figure with n_samples rows and 10 columns for comprehensive visualization
+    fig, axes = plt.subplots(n_samples, 10, figsize=(30, 5 * n_samples))
     
+    # Handle case where n_samples is 1 (axes would be 1D)
+    if n_samples == 1:
+        axes = axes.reshape(1, -1)
+        
+    for i in range(n_samples):
+        # Extract the data for this sample
+        cover_np = cover_imgs[i].cpu().numpy().transpose(1, 2, 0)
+        secret_np = secret_imgs[i].cpu().numpy().transpose(1, 2, 0)
+        
+        # Get the high attention results
+        container_high_np = container_high[i].cpu().numpy().transpose(1, 2, 0)
+        extracted_high_np = extracted_high[i].cpu().numpy().transpose(1, 2, 0)
+        
+        # Get the low attention results
+        container_low_np = container_low[i].cpu().numpy().transpose(1, 2, 0)
+        extracted_low_np = extracted_low[i].cpu().numpy().transpose(1, 2, 0)
+        
+        # Calculate metrics for this sample
+        high_psnr_container = calculate_psnr(cover_np, container_high_np)
+        high_ssim_container = calculate_ssim(cover_np, container_high_np)
+        high_psnr_secret = calculate_psnr(secret_np, extracted_high_np)
+        high_ssim_secret = calculate_ssim(secret_np, extracted_high_np)
+        
+        low_psnr_container = calculate_psnr(cover_np, container_low_np)
+        low_ssim_container = calculate_ssim(cover_np, container_low_np)
+        low_psnr_secret = calculate_psnr(secret_np, extracted_low_np)
+        low_ssim_secret = calculate_ssim(secret_np, extracted_low_np)
+        
+        # Plot images in the combined visualization
+        
+        # Original images
+        axes[i, 0].imshow(np.clip(cover_np, 0, 1))
+        axes[i, 0].set_title("Cover Image")
+        axes[i, 0].axis("off")
+        
+        axes[i, 1].imshow(np.clip(secret_np, 0, 1))
+        axes[i, 1].set_title("Secret Image")
+        axes[i, 1].axis("off")
+        
+        # Attention heatmaps
+        axes[i, 2].imshow(cover_attention[i].cpu().numpy().squeeze(), cmap='hot')
+        axes[i, 2].set_title("Cover Attention")
+        axes[i, 2].axis("off")
+        
+        axes[i, 3].imshow(secret_attention[i].cpu().numpy().squeeze(), cmap='hot')
+        axes[i, 3].set_title("Secret Attention")
+        axes[i, 3].axis("off")
+        
+        # Embedding maps
+        axes[i, 4].imshow(embedding_map_high[i].cpu().numpy().squeeze(), cmap='viridis')
+        axes[i, 4].set_title("High Attn Embedding")
+        axes[i, 4].axis("off")
+        
+        axes[i, 5].imshow(embedding_map_low[i].cpu().numpy().squeeze(), cmap='viridis')
+        axes[i, 5].set_title("Low Attn Embedding")
+        axes[i, 5].axis("off")
+        
+        # High attention results
+        axes[i, 6].imshow(np.clip(container_high_np, 0, 1))
+        axes[i, 6].set_title(f'Container (High)\nPSNR: {high_psnr_container:.2f}dB\nSSIM: {high_ssim_container:.4f}')
+        axes[i, 6].axis("off")
+        
+        axes[i, 7].imshow(np.clip(extracted_high_np, 0, 1))
+        axes[i, 7].set_title(f'Extracted (High)\nPSNR: {high_psnr_secret:.2f}dB\nSSIM: {high_ssim_secret:.4f}')
+        axes[i, 7].axis("off")
+        
+        # Low attention results
+        axes[i, 8].imshow(np.clip(container_low_np, 0, 1))
+        axes[i, 8].set_title(f'Container (Low)\nPSNR: {low_psnr_container:.2f}dB\nSSIM: {low_ssim_container:.4f}')
+        axes[i, 8].axis("off")
+        
+        axes[i, 9].imshow(np.clip(extracted_low_np, 0, 1))
+        axes[i, 9].set_title(f'Extracted (Low)\nPSNR: {low_psnr_secret:.2f}dB\nSSIM: {low_ssim_secret:.4f}')
+        axes[i, 9].axis("off")
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f'results_epoch_{epoch}_combined.png'))
+    plt.close(fig)
 
 def save_checkpoint(state, filename):
     """
@@ -899,10 +892,10 @@ def main():
 
         val_loss, val_hiding_loss, val_extraction_loss, val_psnr_container, val_psnr_secret, val_ssim_container, val_ssim_secret = val_metrics
         
-        # Visualize results with specified attention mode
+        # Visualize results with both high and low attention modes in a single visualization
         visualize_results(steg_system, val_loader, device, args.vis_dir, epoch)
         
-        # If train_both flag is set, also validate and visualize with the opposite attention mode
+        # If train_both flag is set, also validate with the opposite attention mode
         if args.train_both:
             print(f"Validating with {'low' if args.use_high_attention else 'high'} attention regions...")
             opposite_val_metrics = validate(
@@ -912,9 +905,6 @@ def main():
             )
             
             opposite_val_loss, opposite_val_hiding_loss, opposite_val_extraction_loss, opposite_val_psnr_container, opposite_val_psnr_secret, opposite_val_ssim_container, opposite_val_ssim_secret = opposite_val_metrics
-            
-            # Visualize results with opposite attention mode
-            visualize_results(steg_system, val_loader, device, args.vis_dir, epoch)
 
         # Step the scheduler
         scheduler.step()

@@ -137,9 +137,9 @@ class EnhancedSteganographySystem(nn.Module):
         """
         B, _, H, W = strength_map.shape
         
-        # Modified embedding strength range for better balance
-        min_strength = 0.6  # Increased minimum strength (was 0.5)
-        max_strength = 0.9  # Decreased maximum strength (was 0.95)
+        # Modified embedding strength range based on improved values from memory
+        min_strength = 0.5  # Updated value from 0.6 to match memory
+        max_strength = 0.95  # Updated value from 0.9 to match memory
         
         # Apply histogram equalization-like processing to each map individually
         normalized_maps = []
