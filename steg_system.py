@@ -220,7 +220,7 @@ class EnhancedSteganographySystem(nn.Module):
                 bin_width = (max_val - min_val) / n_bins
                 
                 # Create histogram
-                hist = torch.histc(map_b, bins=n_bins, min=min_val, max=max_val)
+                hist = torch.histc(map_b, bins=n_bins, min=min_val.item(), max=max_val.item())
                 
                 # Calculate cumulative distribution function (CDF)
                 cdf = torch.cumsum(hist, 0)
