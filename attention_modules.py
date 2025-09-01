@@ -84,7 +84,7 @@ class DualAttentionHeatmapGenerator(nn.Module):
                 [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
                 [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
                 [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
-            ]).reshape(4, 1, 3, 3).repeat(1, 2, 1, 1)
+            ]).reshape(4, 1, 3, 3).repeat(1, 8, 1, 1)  # Fixed repeat dimension from 2 to 8
         
         # Improved gradient detector with multi-scale perception
         self.gradient_detector = nn.Sequential(
