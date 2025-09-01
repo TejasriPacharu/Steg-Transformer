@@ -35,12 +35,22 @@ class EnhancedHidingNetwork(nn.Module):
                 mlp_ratio=mlp_ratio
             )
             self.layers.append(layer)
+        
+        # Secret information preservation module
+        self.secret_encoder = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2)
+        )
             
         # Residual features from cover image with color-preserving architecture
         self.cover_feat_extractor = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # Increased from 32 to 64
             nn.LeakyReLU(0.2)
         )
 
@@ -48,7 +58,7 @@ class EnhancedHidingNetwork(nn.Module):
         self.secret_feat_extractor = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # Increased from 32 to 64
             nn.LeakyReLU(0.2)
         )
         
@@ -56,25 +66,35 @@ class EnhancedHidingNetwork(nn.Module):
         self.color_preservation = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=1),  # Lightweight color extractor
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # Increased from 16 to 32
             nn.LeakyReLU(0.2)
         )
         
-        # Add dedicated color preservation module for secret image
+        # Enhanced secret color preservation module
         self.secret_color_preserver = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),  # Increased from 16 to 32
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=1),
+            nn.Conv2d(32, 3, kernel_size=1),
             nn.Tanh()  # Allow bidirectional adjustments
+        )
+        
+        # Structure-preserving module for secret image
+        self.structure_preserver = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=5, padding=2),  # Larger kernel to capture structure
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
         )
         
         # Final processing with skip connection from cover features
         self.final_conv = nn.Sequential(
-            nn.Conv2d(embed_dim + 32 + 32 + 16, 96, kernel_size=3, padding=1),  # Added color preservation
+            nn.Conv2d(embed_dim + 64 + 64 + 32 + 16, 128, kernel_size=3, padding=1),  # Updated dimensions
             nn.LeakyReLU(0.2),
-            nn.Conv2d(96, 64, kernel_size=3, padding=1),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
@@ -83,15 +103,28 @@ class EnhancedHidingNetwork(nn.Module):
         )
 
         # Dynamic alpha parameter for better cover-container balance
-        self.alpha_base = nn.Parameter(torch.tensor(0.7))  # Increased for better cover preservation
+        self.alpha_base = nn.Parameter(torch.tensor(0.6))  # Decreased to allow more secret embedding
         
         # Alpha modulation based on attention
         self.alpha_modulator = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 1, kernel_size=1),
             nn.Sigmoid()
         )
+        
+        # Adaptive secret strength modulator
+        self.secret_strength_modulator = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Initialize minimum embedding constant - increased for better secret recovery
+        self.min_embed_constant = 0.15  # Was 0.05
     
     def forward(self, cover_img, secret_img, embedding_map):
         B, C, H, W = cover_img.shape
@@ -108,16 +141,25 @@ class EnhancedHidingNetwork(nn.Module):
         # Preserve color information of secret image
         secret_color_preserved = self.secret_color_preserver(secret_img)
         
+        # Extract structure information from secret image
+        secret_structure = self.structure_preserver(secret_img)
+        
         # Create a dynamic alpha map based on embedding map
         # Areas with high embedding get lower alpha (more modification)
         alpha_map = self.alpha_modulator(embedding_map)
         dynamic_alpha = self.alpha_base * alpha_map
         
+        # Encode secret information for better preservation
+        secret_encoded = self.secret_encoder(secret_img)
+        
+        # Calculate adaptive secret strength based on secret image content
+        secret_importance = self.secret_strength_modulator(secret_img)
+        
         # Expand embedding map to match secret channels for element-wise multiplication
         embedding_map_expanded = embedding_map.expand(-1, C, -1, -1)
         
-        # Weight secret image by embedding map with gradual effect
-        weighted_secret = secret_img * embedding_map_expanded
+        # Weight secret image by embedding map with stronger effect
+        weighted_secret = secret_img * (embedding_map_expanded + 0.1)  # Added 0.1 to preserve more secret information
         
         # Combine cover, weighted secret, and embedding map
         combined = torch.cat([cover_img, weighted_secret, embedding_map], dim=1)
@@ -129,45 +171,60 @@ class EnhancedHidingNetwork(nn.Module):
         for layer in self.layers:
             x = layer(x)
         
-        # Combine with cover features, secret features and color features
-        x = torch.cat([x, cover_features, secret_features, color_features], dim=1)
+        # Combine with cover features, secret features, color features and structure features
+        x = torch.cat([x, cover_features, secret_features, color_features, secret_structure], dim=1)
         
         # Final processing - output with tanh for better color dynamics
         residual = self.final_conv(x)
         
-        # Dynamic blending with position-specific alpha - increased alpha range for better cover preservation
-        # Alpha range: 0.7 to 0.9 (higher values preserve more of the cover)
-        dynamic_alpha_expanded = 0.7 + 0.2 * dynamic_alpha.expand(-1, C, -1, -1)
+        # Dynamic blending with position-specific alpha - adjusted range for better secret preservation
+        # Alpha range: 0.6 to 0.85 (lower values allow more secret information to be embedded)
+        dynamic_alpha_expanded = 0.6 + 0.25 * dynamic_alpha.expand(-1, C, -1, -1)
         container = dynamic_alpha_expanded * cover_img + (1 - dynamic_alpha_expanded) * ((residual + 1) / 2)
         
-        # Direct secret contribution with more careful scaling
-        # Updated embedding strength to align with EnhancedSteganographySystem values
-        min_embed_strength = 0.05  # Increased for better secret preservation
-        max_embed_strength = 0.15  # Increased for better secret preservation
+        # Direct secret contribution with more aggressive scaling
+        # Apply different embedding strengths for each color channel to help preserve color information
+        min_embed_strength = torch.ones((B, 3, 1, 1), device=embedding_map.device) * self.min_embed_constant
+        min_embed_strength[:, 0, :, :] *= 1.2  # More emphasis on red channel
+        min_embed_strength[:, 1, :, :] *= 1.1  # Slight emphasis on green channel
+        min_embed_strength[:, 2, :, :] *= 1.3  # Even more emphasis on blue channel to fix color issues
+        
+        max_embed_strength = torch.ones((B, 3, 1, 1), device=embedding_map.device) * 0.25  # Increased from 0.15
         
         # Scale the embedding map to determine secret contribution strength
         contribution_strength = min_embed_strength + (max_embed_strength - min_embed_strength) * embedding_map_expanded
         
-        # Apply the direct secret contribution with the secret features to guide embedding
-        # Use scaled sigmoid for a smoother embedding that preserves the secret
-        secret_signal = torch.sigmoid(5 * (secret_color_preserved - 0.5))  # Use color-preserved secret
-        secret_contribution = contribution_strength * secret_signal
+        # Enhance contribution strength in areas important for the secret image
+        contribution_strength = contribution_strength * (1.0 + 0.5 * secret_importance.expand(-1, C, -1, -1))
         
-        # Add contribution and clamp to valid image range
-        container = torch.clamp(container + secret_contribution, 0, 1)
+        # Apply the direct secret contribution using both color-preserved secret and encoded features
+        # Use scaled sigmoid for a smoother embedding that preserves the secret
+        secret_signal = torch.sigmoid(8 * (secret_color_preserved))  # Increased scaling factor for more pronounced effect
+        
+        # Add direct secret contribution to container
+        secret_contribution = contribution_strength * secret_signal
+        container = container + secret_contribution
+        
+        # Add additional modulated secret information using encoded features
+        secret_encoded_norm = torch.tanh(secret_encoded[:, :3]) * 0.05  # Limit the effect and ensure 3 channels
+        container = container + secret_encoded_norm * embedding_map_expanded * secret_importance.expand(-1, C, -1, -1)
+        
+        # Clamp to valid image range
+        container = torch.clamp(container, 0, 1)
         
         return container
+
 
 class EnhancedExtractionNetwork(nn.Module):
     def __init__(self, img_size=144, window_size=8, embed_dim=128, depths=[6, 6, 6, 6],
                  num_heads=[8, 8, 8, 8], mlp_ratio=4.):
         super().__init__()
         
-        # Add a more powerful initial feature extraction
+        # Add a more powerful initial feature extraction with multi-scale perception
         self.initial_conv = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Extra conv layer
+            nn.Conv2d(64, 64, kernel_size=5, padding=2),  # Larger kernel for broader context
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, embed_dim, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2)
@@ -186,198 +243,233 @@ class EnhancedExtractionNetwork(nn.Module):
             )
             self.layers.append(layer)
         
-        # Add direct skip connections from intermediate layers
+        # Advanced multi-level feature extraction with skip connections
         self.skip_features = nn.ModuleList()
         for i in range(len(depths)):
             self.skip_features.append(
-                nn.Conv2d(embed_dim, 16, kernel_size=1)  # Projection for skip features
+                nn.Sequential(
+                    nn.Conv2d(embed_dim, 32, kernel_size=3, padding=1),  # Increased from 16 to 32
+                    nn.LeakyReLU(0.2),
+                    nn.Conv2d(32, 32, kernel_size=1)
+                )
             )
         
-        # Add attention mechanism to focus on areas with embedded data
-        self.attention_gate = nn.Sequential(
-            nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1),
+        # Enhanced attention mechanism with spatial and channel attention
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(embed_dim, 64, kernel_size=7, padding=3),  # Larger receptive field
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 1, kernel_size=1),
             nn.Sigmoid()
         )
         
-        # Color correction module to address color distortion
+        # Channel attention module
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(embed_dim, embed_dim // 4, kernel_size=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(embed_dim // 4, embed_dim, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Multi-scale feature enhancement
+        self.multi_scale_features = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2)
+            ),
+            nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=5, padding=2),
+                nn.LeakyReLU(0.2)
+            ),
+            nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=7, padding=3),
+                nn.LeakyReLU(0.2)
+            )
+        ])
+        
+        # Improved color correction module with chromatic adaptation
         self.color_corrector = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=5, padding=2),  # Large kernel for global color context
+            nn.Conv2d(3, 32, kernel_size=5, padding=2),  # Larger kernel for global color context
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=1),
+            nn.Conv2d(32, 3, kernel_size=1),
             nn.Tanh()  # Allow both positive and negative color adjustments
         )
         
-        # Color transfer module
+        # Advanced color transfer module with reference-based correction
         self.color_transfer = nn.Sequential(
+            nn.Conv2d(6, 32, kernel_size=3, padding=1),  # 3 channels input + 3 channels of statistics
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 3, kernel_size=1),
+            nn.Tanh()
+        )
+        
+        # Enhanced channel calibration module
+        self.channel_calibration = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 3, kernel_size=1),
-            nn.Tanh()  # Allow both positive and negative color adjustments
+            nn.Sigmoid()  # Output channel calibration weights
         )
         
-        # RGB channel correlation module
-        self.rgb_correlation = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+        # Global color statistics modeling
+        self.global_color_stats = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(3, 12, kernel_size=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=1),
-            nn.Sigmoid()  # Output correlation weights
-        )
-        
-        # Color statistics modeling module
-        self.color_stats_modeler = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 6, kernel_size=3, padding=1),
-            nn.Sigmoid()  # Output color statistics
-        )
-        
-        # HSV color correction module
-        self.hsv_corrector = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=3, padding=1),
-            nn.Sigmoid()  # Output HSV adjustments
+            nn.Conv2d(12, 6, kernel_size=1),
+            nn.Sigmoid()  # Output global color statistics
         )
         
         # Convert back to image space
         self.conv_out = nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1)
         
-        # Final processing with concatenated skip features
-        self.final_conv = nn.Sequential(
-            nn.Conv2d(64 + 16 * len(depths), 128, kernel_size=3, padding=1),
+        # Multi-branch feature fusion
+        self.feature_fusion = nn.Sequential(
+            nn.Conv2d(64 + 32 * len(depths) + embed_dim // 2 * 3, 128, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2)
+        )
+        
+        # Progressive decoder for initial image extraction
+        self.progressive_decoder = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(32, 3, kernel_size=3, padding=1),
-            nn.Sigmoid()  # Added sigmoid for proper 0-1 range
+            nn.Sigmoid()
         )
         
-        # Add residual refinement layer for final detail enhancement
-        self.refine = nn.Sequential(
-            nn.Conv2d(6, 32, kernel_size=3, padding=1),  # Input: concat of initial extraction and container
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=3, padding=1),
-            nn.Tanh()  # Tanh to allow positive and negative refinements
-        )
+        # Multi-stage refinement modules
+        self.refinement_stages = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(9, 32, kernel_size=3, padding=1),  # 3 (current) + 3 (container) + 3 (previous)
+                nn.LeakyReLU(0.2),
+                nn.Conv2d(32, 16, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2),
+                nn.Conv2d(16, 3, kernel_size=3, padding=1),
+                nn.Tanh()
+            ) for _ in range(3)  # 3 refinement stages
+        ])
         
-        # Contrast enhancement module
-        self.contrast_enhancer = nn.Sequential(
+        # Detail enhancement module
+        self.detail_enhancer = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 3, kernel_size=3, padding=1),
             nn.Tanh()
         )
         
-        # Add color balance correction module
+        # Color balance correction
         self.color_balance = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),  # Global pooling for color statistics
-            nn.Conv2d(3, 8, kernel_size=1),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(3, 12, kernel_size=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(8, 3, kernel_size=1),
-            nn.Sigmoid()  # Output color multipliers
+            nn.Conv2d(12, 3, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Final color normalization layer
+        self.color_normalizer = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 3, kernel_size=1),
+            nn.Sigmoid()
         )
     
     def forward(self, container_img):
         # Initial feature extraction
         x = self.initial_conv(container_img)
         
-        # Process through RSTB blocks with skip connections
+        # Process through RSTB blocks with enhanced skip connections
         skip_outputs = []
         for i, layer in enumerate(self.layers):
             x_prev = x  # Save the input to this layer
             x = layer(x)
             skip_outputs.append(self.skip_features[i](x_prev))
         
-        # Generate attention map for focusing on embedded data
-        attention_map = self.attention_gate(x)
-        x = x * attention_map + x  # Apply soft attention (residual)
+        # Apply dual attention mechanism
+        spatial_attn = self.spatial_attention(x)
+        channel_attn = self.channel_attention(x)
+        
+        # Apply both attention types
+        x = x * spatial_attn * channel_attn + x  # Residual connection
+        
+        # Extract multi-scale features
+        multi_scale_feats = [module(x) for module in self.multi_scale_features]
         
         # Convert to image space
-        x = self.conv_out(x)
+        x_out = self.conv_out(x)
         
-        # Concatenate skip features
+        # Concatenate skip features and multi-scale features
         for skip in skip_outputs:
-            x = torch.cat([x, skip], dim=1)
+            x_out = torch.cat([x_out, skip], dim=1)
+        
+        for feat in multi_scale_feats:
+            x_out = torch.cat([x_out, feat], dim=1)
+        
+        # Fuse all features
+        x_fused = self.feature_fusion(x_out)
+        
+        # Initial secret extraction
+        initial_secret = self.progressive_decoder(x_fused)
+        
+        # Multi-stage progressive refinement
+        current_secret = initial_secret
+        
+        # Obtain global color statistics
+        global_stats = self.global_color_stats(current_secret)
+        global_stats_expanded = global_stats.expand(-1, -1, current_secret.size(2), current_secret.size(3))
+        
+        # Apply color transfer with statistics
+        transfer_input = torch.cat([current_secret, global_stats_expanded[:, :3, :, :]], dim=1)
+        color_transferred = self.color_transfer(transfer_input)
+        current_secret = current_secret + 0.2 * color_transferred
+        
+        # Apply progressive refinement stages
+        for i, refine_module in enumerate(self.refinement_stages):
+            # Create input for refinement (current + container + previous if available)
+            if i == 0:
+                refine_input = torch.cat([current_secret, container_img, initial_secret], dim=1)
+            else:
+                refine_input = torch.cat([current_secret, container_img, initial_secret], dim=1)
             
-        # First-pass extraction (with sigmoid)
-        initial_secret = self.final_conv(x)
+            # Apply refinement
+            refinement = refine_module(refine_input)
+            
+            # Add refinement with decreasing strength at each stage
+            weight = 0.2 / (i + 1)  # 0.2, 0.1, 0.067
+            current_secret = torch.clamp(current_secret + weight * refinement, 0, 1)
+            
+            # Apply color calibration at each stage
+            calibration_weights = self.channel_calibration(current_secret)
+            current_secret = current_secret * (0.9 + 0.2 * calibration_weights)  # Range: 0.9 to 1.1
         
-        # Refinement using both the container and initial extraction
-        refine_input = torch.cat([initial_secret, container_img], dim=1)
-        refinement = self.refine(refine_input)
+        # Apply detail enhancement for final sharpness
+        detail_enhancement = self.detail_enhancer(current_secret)
+        enhanced_secret = current_secret + 0.1 * detail_enhancement
         
-        # Apply refinement with increased strength for better detail recovery
-        secret_with_refinement = initial_secret + 0.2 * refinement  # Reduced from 0.3
-        
-        # Apply color correction
-        color_adjustment = self.color_corrector(secret_with_refinement)
-        color_corrected = secret_with_refinement + 0.15 * color_adjustment  # Reduced from 0.2
-        
-        # Apply color transfer
-        color_transfer = self.color_transfer(color_corrected)
-        color_transferred = color_corrected + 0.1 * color_transfer  # Reduced from 0.15
-        
-        # Apply contrast enhancement
-        contrast_adjustment = self.contrast_enhancer(color_transferred)
-        enhanced_secret = color_transferred + 0.1 * contrast_adjustment  # Reduced from 0.15
-        
-        # Apply color balance correction
+        # Apply color balance correction for final color adjustment
         color_multipliers = self.color_balance(enhanced_secret)
-        balanced_secret = enhanced_secret * (0.8 + 0.4 * color_multipliers)  # Range: 0.8 to 1.2
+        balanced_secret = enhanced_secret * (0.9 + 0.2 * color_multipliers)  # Range: 0.9 to 1.1
         
-        # Apply RGB channel correlation
-        correlation_weights = self.rgb_correlation(balanced_secret)
-        correlated_secret = balanced_secret * correlation_weights
+        # Apply color correction for better RGB distribution
+        color_correction = self.color_corrector(balanced_secret)
+        color_corrected = balanced_secret + 0.15 * color_correction
         
-        # Apply color statistics modeling for better distribution matching
-        color_stats = self.color_stats_modeler(correlated_secret)
-        mean_shift = color_stats[:, :3, :, :] * 0.2 - 0.1  # Range: -0.1 to 0.1
-        variance_scale = color_stats[:, 3:, :, :] * 0.4 + 0.8  # Range: 0.8 to 1.2
-        
-        # Apply color statistics correction
-        stats_corrected = correlated_secret * variance_scale + mean_shift
-        
-        # Apply HSV color correction
-        # First convert RGB to HSV-like space for adjustment
-        r, g, b = stats_corrected[:, 0:1, :, :], stats_corrected[:, 1:2, :, :], stats_corrected[:, 2:3, :, :]
-        
-        # Calculate hue, saturation, value approximations
-        max_c = torch.max(stats_corrected, dim=1, keepdim=True)[0]
-        min_c = torch.min(stats_corrected, dim=1, keepdim=True)[0]
-        delta = max_c - min_c + 1e-7
-        
-        # Create HSV representation
-        hsv_approx = torch.cat([delta, max_c, (r + g + b) / 3], dim=1)  # Simple approximation
-        
-        # Get HSV adjustments
-        hsv_adjustment = self.hsv_corrector(stats_corrected)
-        
-        # Apply HSV adjustments
-        h_adj, s_adj, v_adj = hsv_adjustment[:, 0:1, :, :], hsv_adjustment[:, 1:2, :, :], hsv_adjustment[:, 2:3, :, :]
-        
-        # Adjust each channel separately
-        r_adj = r + 0.05 * v_adj + 0.025 * h_adj 
-        g_adj = g + 0.05 * v_adj - 0.01 * h_adj
-        b_adj = b + 0.05 * v_adj + 0.02 * h_adj
-        
-        # Combine and apply saturation adjustment
-        hsv_corrected = torch.cat([r_adj, g_adj, b_adj], dim=1)
-        
-        # Apply saturation adjustment globally
-        avg_color = torch.mean(hsv_corrected, dim=1, keepdim=True)
-        hsv_corrected = avg_color + (hsv_corrected - avg_color) * (1.0 + 0.1 * s_adj)
+        # Final color normalization
+        final_secret = self.color_normalizer(color_corrected)
         
         # Ensure final output is properly bounded
-        final_secret = torch.clamp(hsv_corrected, 0, 1)
+        final_secret = torch.clamp(final_secret, 0, 1)
         
         return final_secret
