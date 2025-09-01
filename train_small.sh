@@ -1,19 +1,19 @@
-# Run training with optimized parameters for better color reproduction
+# Run training with optimized parameters for better performance
 echo "TRAINING BEGINS."
 python training-script.py \
-    --dataset_path=./dataset \
-    --batch_size 8 \
-    --epochs 20 \
-    --lr 0.0001 \
+    --data_dir=./dataset \
+    --batch_size=4 \
+    --epochs 10 \
+    --lr 0.001 \
     --alpha 0.6 \
     --beta 0.4 \
-    --use_high_attention \
-    --pretrain_epochs 3 \
-    --checkpoint_dir ./checkpoints \
-    --save_interval 2 \
+    --pretrain_epochs 1 \
+    --save_dir ./checkpoints \
+    --vis_dir ./visualizations \
     --resume 0 \
     --img_size 144 \
-    --embedding_dim 128 \
-    --window_size 8 \
-    --attention_diversity_weight 0.01 \
-    --color_preservation_weight 0.2
+    --pretrain \
+    --num_heads 2 2 2 2 \
+    --depths 2 2 2 2 \
+    --embed_dim 24 \
+    --window_size 4 \
