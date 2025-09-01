@@ -1,5 +1,3 @@
 # Ignore the virtual environment folder
 __pycache__/
-#debug_checkpoints/
-#checkpoints/
-#pretrained_extraction_network.pth
+pretrained_extraction_network.pth

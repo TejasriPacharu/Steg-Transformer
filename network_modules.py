@@ -60,6 +60,16 @@ class EnhancedHidingNetwork(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
+        # Add dedicated color preservation module for secret image
+        self.secret_color_preserver = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 3, kernel_size=1),
+            nn.Tanh()  # Allow bidirectional adjustments
+        )
+        
         # Final processing with skip connection from cover features
         self.final_conv = nn.Sequential(
             nn.Conv2d(embed_dim + 32 + 32 + 16, 96, kernel_size=3, padding=1),  # Added color preservation
@@ -94,6 +104,9 @@ class EnhancedHidingNetwork(nn.Module):
         
         # Extract color features from cover for better color preservation
         color_features = self.color_preservation(cover_img)
+        
+        # Preserve color information of secret image
+        secret_color_preserved = self.secret_color_preserver(secret_img)
         
         # Create a dynamic alpha map based on embedding map
         # Areas with high embedding get lower alpha (more modification)
@@ -137,7 +150,7 @@ class EnhancedHidingNetwork(nn.Module):
         
         # Apply the direct secret contribution with the secret features to guide embedding
         # Use scaled sigmoid for a smoother embedding that preserves the secret
-        secret_signal = torch.sigmoid(5 * (secret_img - 0.5))  # Sharper sigmoid for better contrast
+        secret_signal = torch.sigmoid(5 * (secret_color_preserved - 0.5))  # Use color-preserved secret
         secret_contribution = contribution_strength * secret_signal
         
         # Add contribution and clamp to valid image range
@@ -196,6 +209,42 @@ class EnhancedExtractionNetwork(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Conv2d(16, 3, kernel_size=1),
             nn.Tanh()  # Allow both positive and negative color adjustments
+        )
+        
+        # Color transfer module
+        self.color_transfer = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 3, kernel_size=1),
+            nn.Tanh()  # Allow both positive and negative color adjustments
+        )
+        
+        # RGB channel correlation module
+        self.rgb_correlation = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 3, kernel_size=1),
+            nn.Sigmoid()  # Output correlation weights
+        )
+        
+        # Color statistics modeling module
+        self.color_stats_modeler = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 6, kernel_size=3, padding=1),
+            nn.Sigmoid()  # Output color statistics
+        )
+        
+        # HSV color correction module
+        self.hsv_corrector = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),
+            nn.Sigmoid()  # Output HSV adjustments
         )
         
         # Convert back to image space
@@ -274,32 +323,61 @@ class EnhancedExtractionNetwork(nn.Module):
         color_adjustment = self.color_corrector(secret_with_refinement)
         color_corrected = secret_with_refinement + 0.15 * color_adjustment  # Reduced from 0.2
         
+        # Apply color transfer
+        color_transfer = self.color_transfer(color_corrected)
+        color_transferred = color_corrected + 0.1 * color_transfer  # Reduced from 0.15
+        
         # Apply contrast enhancement
-        contrast_adjustment = self.contrast_enhancer(color_corrected)
-        enhanced_secret = color_corrected + 0.1 * contrast_adjustment  # Reduced from 0.15
+        contrast_adjustment = self.contrast_enhancer(color_transferred)
+        enhanced_secret = color_transferred + 0.1 * contrast_adjustment  # Reduced from 0.15
         
         # Apply color balance correction
         color_multipliers = self.color_balance(enhanced_secret)
         balanced_secret = enhanced_secret * (0.8 + 0.4 * color_multipliers)  # Range: 0.8 to 1.2
         
-        # Normalize histogram to improve contrast
-        b, c, h, w = balanced_secret.shape
-        normalized_secret = balanced_secret.clone()
+        # Apply RGB channel correlation
+        correlation_weights = self.rgb_correlation(balanced_secret)
+        correlated_secret = balanced_secret * correlation_weights
         
-        for i in range(b):
-            for j in range(c):
-                # Get channel
-                channel = balanced_secret[i, j]
-                
-                # Get percentiles for robust normalization
-                low_val = torch.quantile(channel.flatten(), 0.01)  # Reduced from 0.02
-                high_val = torch.quantile(channel.flatten(), 0.99)  # Increased from 0.98
-                
-                # Apply normalization with reduced stretching
-                normalized = 0.05 + 0.9 * (channel - low_val) / (high_val - low_val + 1e-6)  # Range: 0.05 to 0.95
-                normalized_secret[i, j] = torch.clamp(normalized, 0, 1)
+        # Apply color statistics modeling for better distribution matching
+        color_stats = self.color_stats_modeler(correlated_secret)
+        mean_shift = color_stats[:, :3, :, :] * 0.2 - 0.1  # Range: -0.1 to 0.1
+        variance_scale = color_stats[:, 3:, :, :] * 0.4 + 0.8  # Range: 0.8 to 1.2
+        
+        # Apply color statistics correction
+        stats_corrected = correlated_secret * variance_scale + mean_shift
+        
+        # Apply HSV color correction
+        # First convert RGB to HSV-like space for adjustment
+        r, g, b = stats_corrected[:, 0:1, :, :], stats_corrected[:, 1:2, :, :], stats_corrected[:, 2:3, :, :]
+        
+        # Calculate hue, saturation, value approximations
+        max_c = torch.max(stats_corrected, dim=1, keepdim=True)[0]
+        min_c = torch.min(stats_corrected, dim=1, keepdim=True)[0]
+        delta = max_c - min_c + 1e-7
+        
+        # Create HSV representation
+        hsv_approx = torch.cat([delta, max_c, (r + g + b) / 3], dim=1)  # Simple approximation
+        
+        # Get HSV adjustments
+        hsv_adjustment = self.hsv_corrector(stats_corrected)
+        
+        # Apply HSV adjustments
+        h_adj, s_adj, v_adj = hsv_adjustment[:, 0:1, :, :], hsv_adjustment[:, 1:2, :, :], hsv_adjustment[:, 2:3, :, :]
+        
+        # Adjust each channel separately
+        r_adj = r + 0.05 * v_adj + 0.025 * h_adj 
+        g_adj = g + 0.05 * v_adj - 0.01 * h_adj
+        b_adj = b + 0.05 * v_adj + 0.02 * h_adj
+        
+        # Combine and apply saturation adjustment
+        hsv_corrected = torch.cat([r_adj, g_adj, b_adj], dim=1)
+        
+        # Apply saturation adjustment globally
+        avg_color = torch.mean(hsv_corrected, dim=1, keepdim=True)
+        hsv_corrected = avg_color + (hsv_corrected - avg_color) * (1.0 + 0.1 * s_adj)
         
         # Ensure final output is properly bounded
-        final_secret = torch.clamp(normalized_secret, 0, 1)
+        final_secret = torch.clamp(hsv_corrected, 0, 1)
         
         return final_secret
