@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from base_modules import RSTB, PatchEmbed, PatchUnEmbed
 from utils import to_2tuple
 
-# Enhanced Hiding Network with Dual Attention
+
 class EnhancedHidingNetwork(nn.Module):
     """
     Hiding network that uses both cover and secret attention maps
@@ -220,11 +220,11 @@ class EnhancedExtractionNetwork(nn.Module):
                  num_heads=[8, 8, 8, 8], mlp_ratio=4.):
         super().__init__()
         
-        # Add a more powerful initial feature extraction with multi-scale perception
+        # Add a more powerful initial feature extraction
         self.initial_conv = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 64, kernel_size=5, padding=2),  # Larger kernel for broader context
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Extra conv layer
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, embed_dim, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2)
@@ -243,146 +243,23 @@ class EnhancedExtractionNetwork(nn.Module):
             )
             self.layers.append(layer)
         
-        # Advanced multi-level feature extraction with skip connections
+        # Add direct skip connections from intermediate layers
         self.skip_features = nn.ModuleList()
         for i in range(len(depths)):
             self.skip_features.append(
-                nn.Sequential(
-                    nn.Conv2d(embed_dim, 32, kernel_size=3, padding=1),  # Increased from 16 to 32
-                    nn.LeakyReLU(0.2),
-                    nn.Conv2d(32, 32, kernel_size=1)
-                )
+                nn.Conv2d(embed_dim, 16, kernel_size=1)  # Projection for skip features
             )
-        
-        # Enhanced attention mechanism with spatial and channel attention
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(embed_dim, 64, kernel_size=7, padding=3),  # Larger receptive field
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Channel attention module
-        self.channel_attention = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(embed_dim, embed_dim // 4, kernel_size=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(embed_dim // 4, embed_dim, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Multi-scale feature enhancement
-        self.multi_scale_features = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=3, padding=1),
-                nn.LeakyReLU(0.2)
-            ),
-            nn.Sequential(
-                nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=5, padding=2),
-                nn.LeakyReLU(0.2)
-            ),
-            nn.Sequential(
-                nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=7, padding=3),
-                nn.LeakyReLU(0.2)
-            )
-        ])
-        
-        # Improved color correction module with chromatic adaptation
-        self.color_corrector = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=5, padding=2),  # Larger kernel for global color context
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=1),
-            nn.Tanh()  # Allow both positive and negative color adjustments
-        )
-        
-        # Advanced color transfer module with reference-based correction
-        self.color_transfer = nn.Sequential(
-            nn.Conv2d(6, 32, kernel_size=3, padding=1),  # 3 channels input + 3 channels of statistics
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=1),
-            nn.Tanh()
-        )
-        
-        # Enhanced channel calibration module
-        self.channel_calibration = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=1),
-            nn.Sigmoid()  # Output channel calibration weights
-        )
-        
-        # Global color statistics modeling
-        self.global_color_stats = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(3, 12, kernel_size=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(12, 6, kernel_size=1),
-            nn.Sigmoid()  # Output global color statistics
-        )
         
         # Convert back to image space
         self.conv_out = nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1)
         
-        # Multi-branch feature fusion
-        self.feature_fusion = nn.Sequential(
-            nn.Conv2d(64 + 32 * len(depths) + embed_dim // 2 * 3, 128, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2)
-        )
-        
-        # Progressive decoder for initial image extraction
-        self.progressive_decoder = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+        # Final processing with concatenated skip features
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(64 + 16 * len(depths), 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
             nn.Conv2d(32, 3, kernel_size=3, padding=1),
-            nn.Sigmoid()
-        )
-        
-        # Multi-stage refinement modules
-        self.refinement_stages = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(9, 32, kernel_size=3, padding=1),  # 3 (current) + 3 (container) + 3 (previous)
-                nn.LeakyReLU(0.2),
-                nn.Conv2d(32, 16, kernel_size=3, padding=1),
-                nn.LeakyReLU(0.2),
-                nn.Conv2d(16, 3, kernel_size=3, padding=1),
-                nn.Tanh()
-            ) for _ in range(3)  # 3 refinement stages
-        ])
-        
-        # Detail enhancement module
-        self.detail_enhancer = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=3, padding=1),
-            nn.Tanh()
-        )
-        
-        # Color balance correction
-        self.color_balance = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(3, 12, kernel_size=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(12, 3, kernel_size=1),
-            nn.Sigmoid()
-        )
-        
-        # Final color normalization layer
-        self.color_normalizer = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 3, kernel_size=1),
             nn.Sigmoid()
         )
     
@@ -390,86 +267,20 @@ class EnhancedExtractionNetwork(nn.Module):
         # Initial feature extraction
         x = self.initial_conv(container_img)
         
-        # Process through RSTB blocks with enhanced skip connections
+        # Process through RSTB blocks with skip connections
         skip_outputs = []
         for i, layer in enumerate(self.layers):
             x_prev = x  # Save the input to this layer
             x = layer(x)
             skip_outputs.append(self.skip_features[i](x_prev))
         
-        # Apply dual attention mechanism
-        spatial_attn = self.spatial_attention(x)
-        channel_attn = self.channel_attention(x)
-        
-        # Apply both attention types
-        x = x * spatial_attn * channel_attn + x  # Residual connection
-        
-        # Extract multi-scale features
-        multi_scale_feats = [module(x) for module in self.multi_scale_features]
-        
         # Convert to image space
-        x_out = self.conv_out(x)
+        x = self.conv_out(x)
         
-        # Concatenate skip features and multi-scale features
+        # Concatenate skip features
         for skip in skip_outputs:
-            x_out = torch.cat([x_out, skip], dim=1)
-        
-        for feat in multi_scale_feats:
-            x_out = torch.cat([x_out, feat], dim=1)
-        
-        # Fuse all features
-        x_fused = self.feature_fusion(x_out)
-        
-        # Initial secret extraction
-        initial_secret = self.progressive_decoder(x_fused)
-        
-        # Multi-stage progressive refinement
-        current_secret = initial_secret
-        
-        # Obtain global color statistics
-        global_stats = self.global_color_stats(current_secret)
-        global_stats_expanded = global_stats.expand(-1, -1, current_secret.size(2), current_secret.size(3))
-        
-        # Apply color transfer with statistics
-        transfer_input = torch.cat([current_secret, global_stats_expanded[:, :3, :, :]], dim=1)
-        color_transferred = self.color_transfer(transfer_input)
-        current_secret = current_secret + 0.2 * color_transferred
-        
-        # Apply progressive refinement stages
-        for i, refine_module in enumerate(self.refinement_stages):
-            # Create input for refinement (current + container + previous if available)
-            if i == 0:
-                refine_input = torch.cat([current_secret, container_img, initial_secret], dim=1)
-            else:
-                refine_input = torch.cat([current_secret, container_img, initial_secret], dim=1)
+            x = torch.cat([x, skip], dim=1)
             
-            # Apply refinement
-            refinement = refine_module(refine_input)
-            
-            # Add refinement with decreasing strength at each stage
-            weight = 0.2 / (i + 1)  # 0.2, 0.1, 0.067
-            current_secret = torch.clamp(current_secret + weight * refinement, 0, 1)
-            
-            # Apply color calibration at each stage
-            calibration_weights = self.channel_calibration(current_secret)
-            current_secret = current_secret * (0.9 + 0.2 * calibration_weights)  # Range: 0.9 to 1.1
-        
-        # Apply detail enhancement for final sharpness
-        detail_enhancement = self.detail_enhancer(current_secret)
-        enhanced_secret = current_secret + 0.1 * detail_enhancement
-        
-        # Apply color balance correction for final color adjustment
-        color_multipliers = self.color_balance(enhanced_secret)
-        balanced_secret = enhanced_secret * (0.9 + 0.2 * color_multipliers)  # Range: 0.9 to 1.1
-        
-        # Apply color correction for better RGB distribution
-        color_correction = self.color_corrector(balanced_secret)
-        color_corrected = balanced_secret + 0.15 * color_correction
-        
-        # Final color normalization
-        final_secret = self.color_normalizer(color_corrected)
-        
-        # Ensure final output is properly bounded
-        final_secret = torch.clamp(final_secret, 0, 1)
-        
-        return final_secret
+        # Final processing to generate secret image
+        secret = self.final_conv(x)
+        return secret
