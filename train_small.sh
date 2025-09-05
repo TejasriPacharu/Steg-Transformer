@@ -7,7 +7,7 @@ python training-script.py \
     --lr 0.001 \
     --alpha 0.6 \
     --beta 0.4 \
-    --pretrain_epochs 1 \
+    --pretrain_epochs 10 \
     --save_dir ./checkpoints \
     --vis_dir ./visualizations \
     --resume 0 \

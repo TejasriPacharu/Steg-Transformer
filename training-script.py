@@ -614,6 +614,41 @@ def select_visualization_samples(dataloader, device):
     
     return cover_imgs, secret_imgs
 
+def visualize_attention_heatmap(attention_map):
+    """
+    Convert attention map to RGB heatmap for visualization.
+    
+    Args:
+        attention_map: Attention map tensor (2D)
+        
+    Returns:
+        RGB heatmap as numpy array
+    """
+    # Make sure we have a 2D array by squeezing extra dimensions
+    if isinstance(attention_map, torch.Tensor):
+        attention_map = attention_map.detach().cpu().numpy()
+    
+    # Ensure we have a 2D array by squeezing or selecting first channel
+    if attention_map.ndim > 2:
+        attention_map = np.squeeze(attention_map)
+    
+    # If still not 2D (might be 3D with channels), take first channel
+    if attention_map.ndim > 2:
+        attention_map = attention_map[0]
+    
+    # Normalize attention map to [0, 1] range
+    attention_map = attention_map - attention_map.min()
+    attention_map = attention_map / (attention_map.max() + 1e-8)  # Avoid division by zero
+    
+    # Convert to RGB heatmap using matplotlib's colormap
+    import matplotlib.pyplot as plt
+    
+    # Use plt.get_cmap instead of deprecated cm.get_cmap to avoid the warning
+    heatmap = plt.get_cmap('viridis')(attention_map)
+    
+    # Return just the RGB part (3 channels), removing alpha
+    return heatmap[:, :, :3]
+
 def visualize_results(steg_system, dataloader, device, save_dir, epoch):
     """
     Visualize the results on a few sample images using the enhanced steganography system.
@@ -690,21 +725,25 @@ def visualize_results(steg_system, dataloader, device, save_dir, epoch):
         axes[i, 1].set_title("Secret Image")
         axes[i, 1].axis("off")
         
-        # Attention heatmaps
-        axes[i, 2].imshow(cover_attention[i].cpu().numpy().squeeze(), cmap='hot')
+        # Enhanced attention heatmaps using our new visualization function
+        # Create enhanced cover attention heatmap
+        cover_attention_rgb = visualize_attention_heatmap(cover_attention[i])
+        axes[i, 2].imshow(cover_attention_rgb)
         axes[i, 2].set_title("Cover Attention")
         axes[i, 2].axis("off")
         
-        axes[i, 3].imshow(secret_attention[i].cpu().numpy().squeeze(), cmap='hot')
+        # Create enhanced secret attention heatmap
+        secret_attention_rgb = visualize_attention_heatmap(secret_attention[i])
+        axes[i, 3].imshow(secret_attention_rgb)
         axes[i, 3].set_title("Secret Attention")
         axes[i, 3].axis("off")
         
-        # Embedding maps
-        axes[i, 4].imshow(embedding_map_high[i].cpu().numpy().squeeze(), cmap='viridis')
+        # Embedding maps with enhanced visualization
+        axes[i, 4].imshow(visualize_attention_heatmap(embedding_map_high[i]))
         axes[i, 4].set_title("High Attn Embedding")
         axes[i, 4].axis("off")
         
-        axes[i, 5].imshow(embedding_map_low[i].cpu().numpy().squeeze(), cmap='viridis')
+        axes[i, 5].imshow(visualize_attention_heatmap(embedding_map_low[i]))
         axes[i, 5].set_title("Low Attn Embedding")
         axes[i, 5].axis("off")
         
@@ -728,7 +767,7 @@ def visualize_results(steg_system, dataloader, device, save_dir, epoch):
     
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f'results_epoch_{epoch}_combined.png'))
-    plt.close(fig)
+    plt.close()
 
 def save_checkpoint(state, filename):
     """
