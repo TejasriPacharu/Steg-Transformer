@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from base_modules import RSTB, PatchEmbed, PatchUnEmbed
+from base_modules import RSTB, PatchEmbed, PatchUnEmbed, BasicLayer
 from utils import to_2tuple
 
 
@@ -17,7 +17,7 @@ class EnhancedHidingNetwork(nn.Module):
         # Initial convolutional embedding with enhanced design
         self.initial_conv = nn.Sequential(
             # 3 (cover) + 3 (secret) + 1 (embedding map) = 7 channels
-            nn.Conv2d(7, 64, kernel_size=3, padding=1),
+            nn.Conv2d(7, 64, kernel_size=3, padding=1),p
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, embed_dim, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2)
@@ -214,73 +214,140 @@ class EnhancedHidingNetwork(nn.Module):
         
         return container
 
-
 class EnhancedExtractionNetwork(nn.Module):
-    def __init__(self, img_size=144, window_size=8, embed_dim=128, depths=[6, 6, 6, 6],
-                 num_heads=[8, 8, 8, 8], mlp_ratio=4.):
+    def __init__(self, img_size=144, embed_dim=128, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24], window_size=7):
         super().__init__()
+        self.embed_dim = embed_dim
+        self.img_size = img_size
         
-        # Add a more powerful initial feature extraction
-        self.initial_conv = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Extra conv layer
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, embed_dim, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2)
+        # Initial feature extraction
+        self.init_conv = nn.Sequential(
+            nn.Conv2d(3, embed_dim, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
         )
         
-        # RSTB blocks with increased capacity
-        self.layers = nn.ModuleList()
-        for i_layer in range(len(depths)):
-            layer = RSTB(
+        # Color-preserving branch (strengthened)
+        self.color_branch = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=5, padding=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(32, 64, kernel_size=5, padding=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        
+        # Transformer blocks (mirror of HidingNet)
+        self.transformer_blocks = nn.ModuleList()
+        for depth, num_head in zip(depths, num_heads):
+            block = BasicLayer(
                 dim=embed_dim,
                 input_resolution=(img_size, img_size),
-                depth=depths[i_layer],
-                num_heads=num_heads[i_layer],
-                window_size=window_size,
-                mlp_ratio=mlp_ratio
+                depth=depth,
+                num_heads=num_head,
+                window_size=window_size
             )
-            self.layers.append(layer)
+            self.transformer_blocks.append(block)
         
-        # Add direct skip connections from intermediate layers
-        self.skip_features = nn.ModuleList()
-        for i in range(len(depths)):
-            self.skip_features.append(
-                nn.Conv2d(embed_dim, 16, kernel_size=1)  # Projection for skip features
-            )
+        # Residual refinement
+        self.refinement_blocks = nn.ModuleList([
+            ResidualBlock(embed_dim),
+            ResidualBlock(embed_dim),
+            ResidualBlock(embed_dim)
+        ])
         
-        # Convert back to image space
-        self.conv_out = nn.Conv2d(embed_dim, 64, kernel_size=3, padding=1)
+        # Fusion attention
+        self.fusion_attention = FusionAttention(embed_dim + 64)
         
-        # Final processing with concatenated skip features
-        self.final_conv = nn.Sequential(
-            nn.Conv2d(64 + 16 * len(depths), 64, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 3, kernel_size=3, padding=1),
+        # Final reconstruction
+        self.reconstruct = nn.Sequential(
+            nn.Conv2d(embed_dim + 64, embed_dim, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(embed_dim // 2, embed_dim // 4, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(embed_dim // 4, 3, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
-    
-    def forward(self, container_img):
-        # Initial feature extraction
-        x = self.initial_conv(container_img)
         
-        # Process through RSTB blocks with skip connections
-        skip_outputs = []
-        for i, layer in enumerate(self.layers):
-            x_prev = x  # Save the input to this layer
-            x = layer(x)
-            skip_outputs.append(self.skip_features[i](x_prev))
+        # Optional auxiliary heads for multi-scale supervision
+        self.aux_head1 = nn.Conv2d(embed_dim, 3, kernel_size=3, padding=1)
+        self.aux_head2 = nn.Conv2d(96, 3, kernel_size=3, padding=1)
+
+    def forward(self, x, attention_map=None, return_aux=False):
+        # Color-preserving features
+        color_features = self.color_branch(x)
         
-        # Convert to image space
-        x = self.conv_out(x)
+        # Main transformer features
+        features = self.init_conv(x)
+        B, C, H, W = features.shape
+        features_flat = features.flatten(2).transpose(1, 2)  # (B, H*W, C)
         
-        # Concatenate skip features
-        for skip in skip_outputs:
-            x = torch.cat([x, skip], dim=1)
+        for block in self.transformer_blocks:
+            features_flat = block(features_flat)
+        
+        features = features_flat.transpose(1, 2).reshape(B, C, H, W)
+        
+        # Refinement
+        for block in self.refinement_blocks:
+            features = block(features)
+        
+        # Auxiliary predictions (multi-scale supervision)
+        aux1 = torch.sigmoid(self.aux_head1(features))
+        
+        # Merge with color branch
+        merged_features = torch.cat([features, color_features], dim=1)
+        merged_features = self.fusion_attention(merged_features)
+        
+        aux2 = torch.sigmoid(self.aux_head2(merged_features))
+        
+        # Final reconstruction
+        output = self.reconstruct(merged_features)
+        
+        # Attention map refinement (optional)
+        if attention_map is not None:
+            output = output * (0.5 + 0.5 * attention_map.expand_as(output))
+        
+        if return_aux:
+            return output, aux1, aux2
+        else:
+            return output
             
-        # Final processing to generate secret image
-        secret = self.final_conv(x)
-        return secret
+class FusionAttention(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.channel_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels // 8, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // 8, in_channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+        self.spatial_att = nn.Sequential(
+            nn.Conv2d(in_channels, 1, kernel_size=7, padding=3, bias=False),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        ca = self.channel_att(x)
+        sa = self.spatial_att(x)
+        return x * ca * sa
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.relu = nn.LeakyReLU(0.2, inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+        
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        return self.relu(out)

@@ -156,8 +156,21 @@ class CombinedLoss(nn.Module):
         
         edge_loss = F.l1_loss(pred_edges, target_edges)
         
+        # Add color preservation loss - specifically target each color channel
+        # Split into color channels and calculate loss for each
+        color_loss = 0.0
+        for c in range(3):  # RGB channels
+            target_channel_mean = target[:, c:c+1].mean(dim=(2, 3))
+            pred_channel_mean = predicted[:, c:c+1].mean(dim=(2, 3))
+            color_loss += F.mse_loss(pred_channel_mean, target_channel_mean)
+            
+            # Also consider color distribution/variance
+            target_channel_var = target[:, c:c+1].var(dim=(2, 3))
+            pred_channel_var = predicted[:, c:c+1].var(dim=(2, 3))
+            color_loss += 0.5 * F.mse_loss(pred_channel_var, target_channel_var)
+        
         # Combine losses with weighting
-        combined_loss = mse_loss + self.alpha * perceptual_loss + (1 - self.alpha) * edge_loss
+        combined_loss = mse_loss + self.alpha * perceptual_loss + (1 - self.alpha) * edge_loss + 0.2 * color_loss
         
         return combined_loss
 
@@ -226,6 +239,67 @@ def calculate_ssim(img1, img2):
     return ssim
 
 
+def calculate_perceptual_color_loss(secret_img, extracted_secret, vgg_model=None):
+    """
+    Calculate perceptual color loss using a pre-trained VGG model
+    
+    Args:
+        secret_img: Original secret image (B, 3, H, W)
+        extracted_secret: Extracted secret image (B, 3, H, W)
+        vgg_model: Pre-trained VGG model, if None, will create one
+        
+    Returns:
+        Perceptual color loss focusing on color-sensitive features
+    """
+    if vgg_model is None:
+        # Use VGG19 with pre-trained weights
+        import torchvision.models as models
+        vgg = models.vgg19(pretrained=True).features[:9].eval()  # Use early layers for color perception
+        for param in vgg.parameters():
+            param.requires_grad = False
+        vgg = vgg.to(secret_img.device)
+    else:
+        vgg = vgg_model
+    
+    # Normalize images for VGG
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(secret_img.device)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(secret_img.device)
+    
+    secret_img_norm = (secret_img - mean) / std
+    extracted_secret_norm = (extracted_secret - mean) / std
+    
+    # Extract features
+    secret_features = vgg(secret_img_norm)
+    extracted_features = vgg(extracted_secret_norm)
+    
+    # Calculate feature loss
+    perceptual_loss = F.mse_loss(secret_features, extracted_features)
+    
+    # Add color histogram matching loss
+    color_hist_loss = 0
+    for c in range(3):  # RGB channels
+        # Use 10 bins for histogram
+        bins = 10
+        secret_hist = torch.histc(secret_img[:, c], bins=bins, min=0, max=1)
+        extracted_hist = torch.histc(extracted_secret[:, c], bins=bins, min=0, max=1)
+        
+        # Normalize histograms
+        secret_hist = secret_hist / secret_hist.sum()
+        extracted_hist = extracted_hist / extracted_hist.sum()
+        
+        # Earth Mover's Distance approximation
+        cdf_secret = torch.cumsum(secret_hist, dim=0)
+        cdf_extracted = torch.cumsum(extracted_hist, dim=0)
+        
+        # Calculate Wasserstein distance (EMD)
+        emd = torch.sum(torch.abs(cdf_secret - cdf_extracted))
+        color_hist_loss += emd
+    
+    color_hist_loss = color_hist_loss / 3.0  # Average across channels
+    
+    return perceptual_loss + 0.5 * color_hist_loss
+
+
 def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_attention=True):
     """
     Validate the model on the validation set with enhanced metrics including attention diversity
@@ -243,8 +317,16 @@ def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_atte
     total_psnr_secret = 0.0
     total_ssim_secret = 0.0
     total_ssim_container = 0.0
+    total_color_perceptual_loss = 0.0  # Track color perceptual loss
 
-    criterion = CombinedLoss(alpha=0.7)
+    criterion = CombinedLoss(alpha=0.7).to(device)
+    
+    # Initialize VGG model for perceptual loss once and reuse
+    import torchvision.models as models
+    vgg = models.vgg19(pretrained=True).features[:9].eval()
+    for param in vgg.parameters():
+        param.requires_grad = False
+    vgg = vgg.to(device)
     
     with torch.no_grad():
         progress_bar = tqdm(dataloader, desc='Validating')
@@ -261,8 +343,13 @@ def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_atte
             hiding_loss = criterion(container_imgs, cover_imgs)
             extraction_loss = criterion(extracted_secrets, secret_imgs)
 
-            # Combined loss
-            loss = alpha * hiding_loss + beta * extraction_loss
+            # Calculate additional color perceptual loss
+            color_perceptual_loss = calculate_perceptual_color_loss(
+                secret_imgs, extracted_secrets, vgg_model=vgg
+            )
+            
+            # Combined loss with added color perceptual component
+            loss = alpha * hiding_loss + beta * (extraction_loss + 0.3 * color_perceptual_loss)
             
             # Calculate metrics
             for j in range(cover_imgs.size(0)):
@@ -281,17 +368,15 @@ def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_atte
                 ssim_secret = calculate_ssim(secret_np, extracted_np)
 
                 total_psnr_container += psnr_container
-
                 total_psnr_secret += psnr_secret
                 total_ssim_container += ssim_container
-
-
                 total_ssim_secret += ssim_secret
             
             # Update stats
             total_loss += loss.item()
             total_hiding_loss += hiding_loss.item()
             total_extraction_loss += extraction_loss.item()
+            total_color_perceptual_loss += color_perceptual_loss.item()
             
             # Update progress bar
             progress_bar.set_postfix({
@@ -305,10 +390,14 @@ def validate(steg_system, dataloader, device, alpha=0.5, beta=0.5, use_high_atte
     avg_loss = total_loss / len(dataloader)
     avg_hiding_loss = total_hiding_loss / len(dataloader)
     avg_extraction_loss = total_extraction_loss / len(dataloader)
+    avg_color_loss = total_color_perceptual_loss / len(dataloader)
     avg_psnr_container = total_psnr_container / n_samples
     avg_psnr_secret = total_psnr_secret / n_samples
     avg_ssim_container = total_ssim_container / n_samples
     avg_ssim_secret = total_ssim_secret / n_samples
+    
+    # Print color loss specifically
+    print(f"  Color Perceptual Loss: {avg_color_loss:.4f}")
     
     return (avg_loss, avg_hiding_loss, avg_extraction_loss, 
             avg_psnr_container, avg_psnr_secret, 
@@ -341,7 +430,7 @@ def pretrain_extraction(steg_system, train_loader, val_loader, device, num_epoch
     optimizer = optim.AdamW(steg_system.extraction_network.parameters(), lr=lr)
     
     # Define criterion (combined loss)
-    criterion = CombinedLoss(alpha=1.0)  # Full weight on reconstruction quality
+    criterion = CombinedLoss(alpha=1.0).to(device)  # Full weight on reconstruction quality
     
     # Track best validation loss
     best_val_loss = float('inf')
@@ -484,7 +573,7 @@ def train_epoch(steg_system, dataloader, optimizer, device,
         opposite_total_extraction_loss = 0.0
         opposite_total_attention_loss = 0.0
     
-    criterion = CombinedLoss(alpha=0.7)
+    criterion = CombinedLoss(alpha=0.7).to(device)
     
     progress_bar = tqdm(dataloader, desc='Training')
     
@@ -503,6 +592,21 @@ def train_epoch(steg_system, dataloader, optimizer, device,
         # Calculate standard losses for primary mode
         hiding_loss = criterion(container_imgs, cover_imgs)
         extraction_loss = criterion(extracted_secrets, secret_imgs)
+
+        # Additional direct color preservation loss for extracted secrets
+        # This specifically targets color accuracy in the RGB color space
+        color_loss = 0.0
+        for c in range(3):  # RGB channels
+            # Mean color matching
+            secret_mean = secret_imgs[:, c].mean(dim=[1, 2])
+            extracted_mean = extracted_secrets[:, c].mean(dim=[1, 2])
+            color_loss += F.l1_loss(extracted_mean, secret_mean)
+            
+            # Histogram/distribution matching (approximate using variance)
+            secret_var = secret_imgs[:, c].var(dim=[1, 2])
+            extracted_var = extracted_secrets[:, c].var(dim=[1, 2])
+            color_loss += 0.5 * F.l1_loss(extracted_var, secret_var)
+        
         perceptual_loss = F.l1_loss(extracted_secrets, secret_imgs)
         
         # Add attention diversity loss for primary mode
@@ -510,8 +614,8 @@ def train_epoch(steg_system, dataloader, optimizer, device,
         secret_std = secret_attention.view(secret_attention.size(0), -1).std(dim=1).mean()
         attention_loss = torch.exp(-5 * cover_std) + torch.exp(-5 * secret_std)
         
-        # Combined loss for primary mode
-        loss = alpha * hiding_loss + beta * (extraction_loss + 0.5 * perceptual_loss) + 0.1 * attention_loss
+        # Combined loss for primary mode with explicit color loss component
+        loss = alpha * hiding_loss + beta * (extraction_loss + 0.5 * perceptual_loss + 0.3 * color_loss) + 0.1 * attention_loss
         
         # Process with opposite attention mode if training both
         if train_both:
@@ -1054,7 +1158,7 @@ def main():
         # Create the final comparison visualization
         fig, axes = plt.subplots(len(test_cover), 5, figsize=(20, 4 * len(test_cover)))
         
-        # Handle case where there's only one sample
+        # Handle case where n_samples is 1 (axes would be 1D)
         if len(test_cover) == 1:
             axes = axes.reshape(1, -1)
             
@@ -1083,11 +1187,11 @@ def main():
             low_ssim_secret = calculate_ssim(secret_np, extracted_low_np)
             
             # Plot the images
-            axes[i, 0].imshow(cover_np)
+            axes[i, 0].imshow(np.clip(cover_np, 0, 1))
             axes[i, 0].set_title("Cover Image")
             axes[i, 0].axis("off")
             
-            axes[i, 1].imshow(secret_np)
+            axes[i, 1].imshow(np.clip(secret_np, 0, 1))
             axes[i, 1].set_title("Secret Image")
             axes[i, 1].axis("off")
             

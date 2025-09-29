@@ -19,10 +19,6 @@ def calculate_psnr(original, compressed):
     return psnr
 
 def calculate_ssim(original, compressed):
-    """
-    Calculate the Structural Similarity Index (SSIM) between two images.
-    For normalized floating point images, specify data_range=1.0
-    """
     return ssim(original, compressed, multichannel=True, channel_axis=2, data_range=1.0)
 
 def calculate_mse(original, compressed):
